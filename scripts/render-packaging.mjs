@@ -85,7 +85,7 @@ for (const template of walk(templateRoot)) {
   if (relative === path.join("scoop", "omp-switch.json")) {
     const manifest = JSON.parse(content);
     manifest.version = version;
-    manifest.architecture["64bit"].url = `https://github.com/skh2945932142/omp-switch/releases/download/v${version}/${portable.name}`;
+    manifest.architecture["64bit"].url = `https://github.com/1847bell/omp-switch/releases/download/v${version}/${portable.name}`;
     manifest.architecture["64bit"].hash = portable.hash;
     content = JSON.stringify(manifest, null, 2) + "\n";
   }
@@ -105,7 +105,7 @@ if (stillTemplated.length > 0) {
 // tracked file rather than a placeholder. Update it in place.
 const bucketPath = path.join(rootDir, "bucket", "omp-switch.json");
 if (fs.existsSync(bucketPath)) {
-  const bucketUrl = `https://github.com/skh2945932142/omp-switch/releases/download/v${version}/${portable.name}`;
+  const bucketUrl = `https://github.com/1847bell/omp-switch/releases/download/v${version}/${portable.name}`;
   const manifest = JSON.parse(fs.readFileSync(bucketPath, "utf8"));
   const unchanged =
     manifest.version === version &&

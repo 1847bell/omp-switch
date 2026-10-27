@@ -7,11 +7,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/skh2945932142/omp-switch.git"
+    "url": "git+https://github.com/1847bell/omp-switch.git"
   },
-  "homepage": "https://github.com/skh2945932142/omp-switch#readme",
+  "homepage": "https://github.com/1847bell/omp-switch#readme",
   "bugs": {
-    "url": "https://github.com/skh2945932142/omp-switch/issues"
+    "url": "https://github.com/1847bell/omp-switch/issues"
   },
   "keywords": [
     "oh-my-pi",
@@ -39,6 +39,7 @@
     "test:watch": "vitest",
     "preview": "electron-vite preview",
     "package:win": "pnpm build && electron-builder --win nsis zip --publish never",
+    "package:win:portable": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && pnpm build && electron-builder --win zip --publish never",
     "package:linux": "pnpm build && electron-builder --linux AppImage deb rpm --publish never",
     "verify:package-cli": "powershell -ExecutionPolicy Bypass -File scripts/verify-packaged-cli.ps1",
     "build:cli": "vite build --config vite.cli.config.ts",

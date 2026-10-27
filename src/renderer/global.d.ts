@@ -1,5 +1,6 @@
 import type { PromptLibraryView, PromptLibraryMetadata, PromptLibraryText, PromptAdoptionPreview, PromptWriteSnapshot } from "@omp-switch/core";
 import type { ConfigPatch, DiscoveryResult, EffectiveConfig, GatewayPool, GatewayUpstreamHealth, GatewayUpstreamStat, ManagedSurfaceEntry, ModelPrice, PatchPreview, PricingTable, ProfileRef, ProjectContext, ProviderPreset, SessionListPage, SessionMessagePage, SessionRefreshStats, SessionSearchResult, Snapshot, SurfaceBundle, UpdateStatus, UsageReport } from "@omp-switch/core";
+import type { McpConfigFile, McpConfigPreview } from "@omp-switch/core";
 
 export interface OmpSwitchApi {
   getInfo(): Promise<{ version: string; platform: string; installation: { executable: string | null; version: string | null; supported: boolean; reason?: string; schemaMajor?: number; schemaStatus?: string } }>;
@@ -12,6 +13,9 @@ export interface OmpSwitchApi {
   snapshot(profileId: string): Promise<Snapshot>;
   restore(profileId: string, snapshotId: string, options?: { force?: boolean }): Promise<EffectiveConfig>;
   restoreLatest(profileId: string): Promise<{ snapshot: Snapshot; config: EffectiveConfig }>;
+  loadMcpConfig(profileId: string): Promise<McpConfigFile>;
+  previewMcpConfig(profileId: string, content: string, expectedHash: string | null): Promise<McpConfigPreview>;
+  saveMcpConfig(profileId: string, content: string, expectedHash: string | null): Promise<McpConfigFile>;
   discover(options: { baseUrl: string; apiKey?: string; headers?: Record<string, string>; timeoutMs?: number; type?: "ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" }): Promise<DiscoveryResult>;
   listCatalog(query?: string): Promise<ProviderPreset[]>;
   importCatalog(bundle: unknown): Promise<{ version: 1; source: string; entries: ProviderPreset[] }>;

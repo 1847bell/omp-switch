@@ -29,3 +29,4 @@ export {
   isProviderDisabled,
   providerApplyBlockReason,
 } from "./provider-selection";
+export { readMcpEntries, patchMcpEntry, removeMcpEntry, type McpEntry } from "./mcp-entries";

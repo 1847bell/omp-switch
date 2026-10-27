@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { ConfigPatch, DiscoveryResult, EffectiveConfig, GatewayPool, GatewayUpstreamHealth, ManagedSurfaceEntry, ProfileRef, SessionListPage, SessionMessagePage, SessionRefreshStats, SessionSearchResult, Snapshot, SurfaceBundle, UpdateStatus } from "@omp-switch/core";
 
+import type { McpConfigFile, McpConfigPreview } from "@omp-switch/core";
 const api = {
   getInfo: () => ipcRenderer.invoke("app:info"),
   setTheme: (theme: "light" | "dark" | "system") => ipcRenderer.invoke("app:set-theme", theme),
@@ -12,6 +13,9 @@ const api = {
   snapshot: (profileId: string): Promise<Snapshot> => ipcRenderer.invoke("omp:snapshot", profileId),
   restore: (profileId: string, snapshotId: string, options?: { force?: boolean }) => ipcRenderer.invoke("omp:restore", profileId, snapshotId, options),
   restoreLatest: (profileId: string) => ipcRenderer.invoke("omp:restore-latest", profileId),
+  loadMcpConfig: (profileId: string): Promise<McpConfigFile> => ipcRenderer.invoke("mcp:load", profileId),
+  previewMcpConfig: (profileId: string, content: string, expectedHash: string | null): Promise<McpConfigPreview> => ipcRenderer.invoke("mcp:preview", profileId, content, expectedHash),
+  saveMcpConfig: (profileId: string, content: string, expectedHash: string | null): Promise<McpConfigFile> => ipcRenderer.invoke("mcp:save", profileId, content, expectedHash),
   discover: (options: { baseUrl: string; apiKey?: string; headers?: Record<string, string>; timeoutMs?: number; type?: "ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" }): Promise<DiscoveryResult> => ipcRenderer.invoke("omp:discover", options),
   listCatalog: (query?: string) => ipcRenderer.invoke("catalog:list", query),
   importCatalog: (bundle: unknown) => ipcRenderer.invoke("catalog:import", bundle),

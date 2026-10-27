@@ -21,6 +21,15 @@ What `thinkingLevelMap` means in a preset is explained in [pi-thinking-profiles.
 - Hover a model row to assign it to any role in one click; the role's existing thinking suffix is kept.
 - Provider cards and the role picker show `enabledModels` coverage, and warn you in place if a chosen model would be filtered out by OMP.
 
+## MCP configuration
+
+- Open MCP in the Content group immediately below Skills, at the same navigation level; it is item 5 and `Ctrl+5` opens it directly.
+- Create or edit the current profile's primary `mcp.json`: `~/.omp/agent/mcp.json` by default, or its named-profile agent directory, honoring OMP path overrides.
+- Each `mcpServers` server has its own card with add, edit, rename, and delete actions. The editor has separate Key and JSON Object fields for that server, not a whole-file editor. Other entries, root fields, and unknown fields remain untouched.
+- JSON object syntax, unique keys, and MCP configuration validation precede the line diff and confirmation. Deletion also requires confirmation and diff review. Root enable/disable lists are preserved but not edited by the entry editor.
+- Saving rechecks the loaded hash and creates a local snapshot. Invalid JSON and external changes refuse writing. Navigation preserves the draft; refreshing or changing profiles asks before discarding it.
+- Only the profile's primary `mcp.json` is edited: no legacy `.mcp.json` migration, project-file changes, or other tools' MCP edits. Saving does not execute commands, connect servers, or read OAuth databases; reload MCP in OMP to apply changes.
+
 ## Other pages
 
 - **Prompts / Skills / Sessions:** browse the index and read the raw content on demand. The Prompts page also has a local prompt library: add dedicated Markdown folders explicitly, search file names or text, favorite/tag/copy entries, and keep external sources read-only. A selected material can be previewed and adopted as a one-time copy into the current Profile; the source is never edited or synced, and adoption keeps a guarded recovery snapshot.
@@ -38,4 +47,4 @@ What `thinkingLevelMap` means in a preset is explained in [pi-thinking-profiles.
 - **Provider cards:** clicking the card header only expands or collapses the model list; an edit button appears on hover; the detail and editor drawers slide in as a floating sheet instead of squeezing the workspace.
 - **Saving:** roles and settings save independently; a dot appears in the navigation when something is unsaved, and `Ctrl+S` saves; switching profiles asks before discarding edits.
 - **Preview before write:** every save shows a line-by-line diff of `models.yml` / `config.yml` first, and nothing is written until you confirm. The snapshot timeline can be browsed and restored; if an outside edit causes a conflict, a dialog offers a one-click reload.
-- **Shortcuts:** `Ctrl+K` opens the command palette (pages, profiles, providers, actions), `Ctrl+1` to `Ctrl+7` switch pages, and `?` lists every shortcut.
+- **Shortcuts:** `Ctrl+K` opens the command palette (pages, profiles, providers, actions). `Ctrl+1` through `Ctrl+8` follow navigation order: Models, Roles, Prompts, Skills, MCP, Sessions, Usage, Gateway. `?` lists every shortcut.

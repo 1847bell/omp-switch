@@ -17,7 +17,7 @@ const MANIFEST: UpdateManifest = {
   version: 1,
   name: "OMP Switch",
   release: "0.4.4",
-  url: "https://github.com/skh2945932142/omp-switch/releases/tag/v0.4.4",
+  url: "https://github.com/1847bell/omp-switch/releases/tag/v0.4.4",
   summary: "Fixes cost.longContext",
   publishedAt: "2026-09-01T00:00:00Z",
 };
@@ -162,7 +162,7 @@ describe("UpdateChecker throttle and behavior", () => {
 
 describe("isAllowedExternalUrl", () => {
   it("allows https github.com URLs only", () => {
-    expect(isAllowedExternalUrl("https://github.com/skh2945932142/omp-switch/releases/tag/v0.4.4")).toBe(true);
+    expect(isAllowedExternalUrl("https://github.com/1847bell/omp-switch/releases/tag/v0.4.4")).toBe(true);
     expect(isAllowedExternalUrl("http://github.com/x")).toBe(false); // not https
     expect(isAllowedExternalUrl("https://evil.example/x")).toBe(false); // wrong host
     expect(isAllowedExternalUrl("not-a-url")).toBe(false);

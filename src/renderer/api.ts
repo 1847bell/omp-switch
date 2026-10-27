@@ -3,14 +3,35 @@ import type {
   ConfigPatch,
   DiscoveryResult,
   EffectiveConfig,
+  McpConfigFile,
+  McpConfigPreview,
   PatchPreview,
   Snapshot,
 } from "@omp-switch/core";
 import { applyConfigPatch } from "@omp-switch/core/adapter";
+import { validateMcpConfig } from "@omp-switch/core/mcp";
 import i18n from "./i18n";
 
 export function createMockApi(): NonNullable<Window["ompSwitch"]> {
   const memory: Record<string, EffectiveConfig> = {};
+  const mcpFiles = new Map<string, McpConfigFile>();
+  let mcpRevision = 0;
+  const getMcp = (profileId: string): McpConfigFile => mcpFiles.get(profileId) ?? {
+    profileId,
+    path: `~/.omp/${profileId === "default" ? "agent" : `profiles/${profileId}/agent`}/mcp.json`,
+    exists: false,
+    hash: null,
+    content: "",
+    diagnostics: [],
+  };
+  const previewMcp = (profileId: string, content: string, expectedHash: string | null): McpConfigPreview => {
+    const file = getMcp(profileId);
+    if (file.hash !== expectedHash) throw new Error("MCP configuration changed since it was loaded. Reload before saving.");
+    const diagnostics = validateMcpConfig(content);
+    const errors = diagnostics.filter((item) => item.severity === "error");
+    if (errors.length) throw new Error(errors.map((item) => item.message).join("\n"));
+    return { profileId, path: file.path, before: file.exists ? file.content : "", content, expectedHash, diagnostics };
+  };
   const makeConfig = (profileId: string): EffectiveConfig => ({
     profile: {
       id: profileId,
@@ -91,6 +112,14 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       { id: "work", name: "Work Profile", kind: "named", agentDir: "~/.omp/profiles/work/agent" },
     ],
     loadProfile: async (id: string) => get(id),
+    loadMcpConfig: async (profileId) => ({ ...getMcp(profileId) }),
+    previewMcpConfig: async (profileId, content, expectedHash) => previewMcp(profileId, content, expectedHash),
+    saveMcpConfig: async (profileId, content, expectedHash) => {
+      const preview = previewMcp(profileId, content, expectedHash);
+      const file: McpConfigFile = { profileId, path: preview.path, content, exists: true, hash: `demo-mcp-${++mcpRevision}`, diagnostics: preview.diagnostics };
+      mcpFiles.set(profileId, file);
+      return { ...file };
+    },
     preview: async (id: string, patch: ConfigPatch) => {
       const config = get(id);
       const isRemoval = Boolean(patch.removeProviderId);
@@ -193,7 +222,7 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
         version: 1,
         name: "OMP Switch",
         release: "0.5.3",
-        url: "https://github.com/skh2945932142/omp-switch/releases/tag/v0.5.3",
+        url: "https://github.com/1847bell/omp-switch/releases/tag/v0.5.3",
         summary: "修复模型供应商模型配置与主工作区中的长模型名与标识截断显示问题",
         publishedAt: new Date().toISOString(),
       },

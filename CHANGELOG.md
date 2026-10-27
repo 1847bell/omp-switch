@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Added profile-scoped MCP server cards under Content → MCP, with per-entry Key/Object editing, add/rename/delete, JSON validation, diff confirmation, hash-guarded atomic saves, private snapshots, and draft-discard protection. Edits preserve unrelated JSON text and unknown fields.
+- Added `pnpm package:win:portable`, which clears previous `dist/` output and builds only the Windows portable ZIP.
+
+### Changed
+- Renumbered navigation and `Ctrl+1`–`Ctrl+8` in display order: Models, Roles, Prompts, Skills, MCP, Sessions, Usage, Gateway. MCP is now `Ctrl+5`.
+- Point active repository metadata, update checks, release tooling, package templates, and installation links to the `1847bell/omp-switch` fork. Historical release notes and existing package identifiers remain unchanged.
+
 ## 1.0.1 - 2026-10-22
 
 ### Fixed

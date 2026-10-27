@@ -50,11 +50,11 @@ API key 的存放方式按系统区分：
 Windows：
 
 ```powershell
-# winget（已上架，当前收录到 0.9.0（[#446675](https://github.com/microsoft/winget-pkgs/pull/446675)）；1.0.0 待提交）
+# winget（上游包，不代表此 fork 的发布产物）
 winget install skh2945932142.OMPSwitch
 
 # Scoop（仓库自带 bucket，每次发布后自动同步）
-scoop bucket add omp-switch https://github.com/skh2945932142/omp-switch
+scoop bucket add omp-switch https://github.com/1847bell/omp-switch
 scoop install omp-switch
 ```
 
@@ -67,16 +67,16 @@ sudo rpm -i OMP-Switch-1.0.0-linux.rpm
 chmod +x OMP-Switch-1.0.0-linux.AppImage && ./OMP-Switch-1.0.0-linux.AppImage
 ```
 
-你也可以直接去 [Releases](https://github.com/skh2945932142/omp-switch/releases/latest) 下载 Windows 安装包或便携版。Chocolatey 的包已经准备好，还没提交到官方源。
+此 fork 的安装包与便携版从 [Releases](https://github.com/1847bell/omp-switch/releases/latest) 获取；需要先发布对应产物。Chocolatey 模板已准备好，但此 fork 尚未确认官方源上架状态。
 
 只想用 CLI 的话可以用 Docker：
 
 ```bash
 docker run --rm -v "$HOME/.omp:/home/node/.omp" \
-  ghcr.io/skh2945932142/omp-switch-cli:1.0.0 validate --profile default
+  ghcr.io/1847bell/omp-switch-cli:1.0.0 validate --profile default
 ```
 
-镜像已推到 GHCR，但 GitHub 默认把新容器包设为私有，可见性只能由仓库所有者在设置里改。如果拉取时提示 `unauthorized`，看 [docs/install.md](docs/install.md#docker)；本地 `docker build` 不受影响。
+上述镜像地址需先通过此 fork 的发布工作流构建并公开。GitHub 默认把新容器包设为私有，可见性只能由仓库所有者在设置里改；本地 `docker build` 不受影响，详见 [docs/install.md](docs/install.md#docker)。
 
 校验和、provenance 验证等其余安装方式见 **[docs/install.md](docs/install.md)**。
 

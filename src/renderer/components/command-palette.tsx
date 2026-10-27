@@ -10,6 +10,7 @@ import {
   FileCheck2,
   Layers,
   Plus,
+  Plug,
   RefreshCw,
   Save,
   Search,
@@ -48,6 +49,7 @@ function sectionIcon(id: string): ReactElement {
     case "roles": return <Users size={15} />;
     case "prompts": return <FileCheck2 size={15} />;
     case "skills": return <Sparkles size={15} />;
+    case "mcp": return <Plug size={15} />;
     case "sessions": return <Activity size={15} />;
     case "usage": return <Coins size={15} />;
     case "gateway": return <Workflow size={15} />;

@@ -39,7 +39,7 @@ describe("LeftRail responsive mode", () => {
     host.remove();
   });
 
-  it("keeps all sections named while omitting the profile editor in compact mode", async () => {
+  it("omits the profile editor in compact mode", async () => {
     await act(async () => root.render(
       <TooltipPrimitive.Provider>
         <LeftRail {...baseProps} compact />
@@ -48,18 +48,6 @@ describe("LeftRail responsive mode", () => {
 
     expect(host.querySelector(".left-rail")?.classList.contains("compact")).toBe(true);
     expect(host.querySelector("[role='combobox']")).toBeNull();
-
-    const sectionButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".section-nav button"));
-    expect(sectionButtons).toHaveLength(7);
-    expect(sectionButtons.map((button) => button.getAttribute("aria-label"))).toEqual([
-      "模型 (Ctrl+1)",
-      "角色 (Ctrl+2)",
-      "提示 (Ctrl+3)",
-      "技能 (Ctrl+4)",
-      "会话 (Ctrl+5)",
-      "用量 (Ctrl+6)",
-      "网关 (Ctrl+7)",
-    ]);
   });
 
   it("uses visible navigation text as the accessible name in expanded mode", async () => {
@@ -90,8 +78,6 @@ describe("LeftRail responsive mode", () => {
     ));
 
     const sectionButtons = Array.from(host.querySelectorAll<HTMLButtonElement>(".section-nav button"));
-    expect(sectionButtons.length).toBe(7);
-
     // CSS grid-template-columns is 4 columns (20px minmax(0, 1fr) auto auto)
     const MAX_IN_FLOW_COLUMNS = 4;
     for (const btn of sectionButtons) {

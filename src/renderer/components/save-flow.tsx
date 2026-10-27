@@ -108,7 +108,7 @@ export function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () 
   const rows: Array<[string, string]> = [
     ["Ctrl + K", t("save.cmdPalette")],
     ["Ctrl + S", t("save.saveAll")],
-    ["Ctrl + 1 … 7", t("save.switchPage")],
+    ["Ctrl + 1 … 8", t("save.switchPage")],
     ["?", t("save.shortcutHelp")],
     ["↑ ↓ / Enter / Esc", t("save.menuNav")],
   ];

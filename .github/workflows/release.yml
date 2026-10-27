@@ -228,7 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG_NAME#v}"
-          repo="${GITHUB_REPOSITORY:-skh2945932142/omp-switch}"
+          repo="${GITHUB_REPOSITORY:-1847bell/omp-switch}"
           release_url="https://github.com/${repo}/releases/tag/${TAG_NAME}"
           # Pull a short summary from the release notes (the first Added/Fixed bullet), so the
           # in-app "关于" drawer can show what changed without the user opening the browser.

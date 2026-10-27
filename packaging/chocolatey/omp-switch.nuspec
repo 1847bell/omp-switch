@@ -3,15 +3,15 @@
   <metadata>
     <id>omp-switch</id>
     <version>0.2.0</version>
-    <packageSourceUrl>https://github.com/skh2945932142/omp-switch/tree/main/packaging/chocolatey</packageSourceUrl>
-    <owners>skh2945932142</owners>
+    <packageSourceUrl>https://github.com/1847bell/omp-switch/tree/main/packaging/chocolatey</packageSourceUrl>
+    <owners>1847bell</owners>
     <title>OMP Switch</title>
     <authors>OMP Switch contributors</authors>
-    <projectUrl>https://github.com/skh2945932142/omp-switch</projectUrl>
-    <licenseUrl>https://github.com/skh2945932142/omp-switch/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/1847bell/omp-switch</projectUrl>
+    <licenseUrl>https://github.com/1847bell/omp-switch/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <projectSourceUrl>https://github.com/skh2945932142/omp-switch</projectSourceUrl>
-    <bugTrackerUrl>https://github.com/skh2945932142/omp-switch/issues</bugTrackerUrl>
+    <projectSourceUrl>https://github.com/1847bell/omp-switch</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/1847bell/omp-switch/issues</bugTrackerUrl>
     <tags>omp-switch oh-my-pi llm ai configuration admin</tags>
     <summary>Desktop companion for managing Oh My Pi model providers</summary>
     <description>
@@ -26,7 +26,7 @@ rather than migrated.
 Installs per user, because the credential vault is bound to the installing Windows account and is
 not readable by other accounts on the machine.
     </description>
-    <releaseNotes>https://github.com/skh2945932142/omp-switch/releases/tag/v0.2.0</releaseNotes>
+    <releaseNotes>https://github.com/1847bell/omp-switch/releases/tag/v0.2.0</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

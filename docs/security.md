@@ -19,7 +19,7 @@ to it by design), physical access, and malicious Oh My Pi builds.
 
 ## Credentials
 
-API keys never enter Oh My Pi configuration. The configuration receives only a command reference
+Provider API keys saved through the credential UI never enter `models.yml`. That configuration receives only a command reference
 whose shape depends on the platform:
 
 **Windows** — keys are encrypted with Electron `safeStorage` (the user's DPAPI key) into
@@ -81,6 +81,8 @@ Consequences worth stating plainly:
   is allowed and preserves the anchor.
 - **Version gating.** Only Oh My Pi schema majors 16, 17, and 18 are writable; anything else opens
   read-only rather than being migrated on a guess.
+- **MCP entry configuration.** The editor changes one server key/object at a time in the selected profile's primary `mcp.json`, validates before preview/save, preserves unrelated JSON bytes, and rechecks the original hash before an atomic replacement. Deletion requires confirmation and diff review. It never starts configured processes, resolves env/header references, connects servers, or accesses OAuth storage. Existing `.mcp.json`, project configs, and other tools' files remain untouched.
+- MCP JSON and its pre-write snapshots may contain plaintext env/header/auth secrets. Snapshots are stored under `userData/mcp-snapshots/mcp/<profile>/`, capped at 30; directories/files are private (0700/0600 where supported). These snapshots are separate from the models/config restore UI and must not be uploaded or committed.
 
 ## Renderer security & Desktop sandbox
 

@@ -41,8 +41,8 @@ export interface UpdateStatus {
 export const VERIFY_PUBLIC_KEY = "6BinnnFiq6WYtVR2LXd6XWUIQHUgIiFvcGUyIlyXFcc=";
 
 /** The fixed, signed-manifest URLs. Both are GET; neither accepts any query. */
-export const MANIFEST_URL = "https://github.com/skh2945932142/omp-switch/releases/download/latest/latest.json";
-export const MANIFEST_SIG_URL = "https://github.com/skh2945932142/omp-switch/releases/download/latest/latest.json.sig";
+export const MANIFEST_URL = "https://github.com/1847bell/omp-switch/releases/download/latest/latest.json";
+export const MANIFEST_SIG_URL = "https://github.com/1847bell/omp-switch/releases/download/latest/latest.json.sig";
 
 /** How often an automatic (non-forced) check may run. */
 export const AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;

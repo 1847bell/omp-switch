@@ -706,3 +706,23 @@
 .library-tag-filter { display: flex; align-items: center; gap: 7px; min-width: 120px; padding: 0 9px; height: 30px; border-bottom: 1px solid var(--hairline); color: var(--muted); }
 .library-tag-filter:focus-within { border-color: var(--signal); }
 .library-tag-filter input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; }
+
+/* ---- MCP entry cards and object editor ---- */
+.mcp-list-panel { display: grid; gap: 14px; min-width: 0; }
+.mcp-file-bar { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--fs-micro); }
+.mcp-file-bar .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-missing { color: var(--warn); }
+.mcp-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+.mcp-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-width: 0; padding: 16px; border: 1px solid var(--hairline); border-radius: var(--radius-m); background: var(--panel); box-shadow: var(--shadow-card); }
+.mcp-card-main { display: grid; gap: 10px; min-width: 0; }
+.mcp-card-main > strong { overflow-wrap: anywhere; }
+.mcp-card-meta, .mcp-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcp-card-actions { flex-shrink: 0; }
+.mcp-entry-dialog { width: min(760px, calc(100vw - 32px)); }
+.mcp-entry-description { margin: 0; padding: 0 24px; color: var(--muted); font-size: var(--fs-small); }
+.mcp-entry-fields { display: grid; gap: 16px; }
+.mcp-object-editor { width: 100%; min-height: 300px; resize: vertical; padding: 12px; border: 1px solid var(--control-border); border-radius: var(--radius-s); color: var(--ink); background: var(--sunken); font: 13px/1.55 var(--font-mono); tab-size: 2; }
+.mcp-object-editor:focus { outline: 2px solid var(--signal); outline-offset: -1px; }
+.mcp-help { color: var(--muted); font-size: var(--fs-small); }
+.mcp-diagnostics { display: grid; gap: 5px; }
+@media (max-width: 640px) { .mcp-card { align-items: flex-start; flex-direction: column; } }

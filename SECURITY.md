@@ -8,7 +8,7 @@ Security fixes go into the latest release (currently `v0.8.0`). Older releases d
 
 Please use GitHub's private vulnerability-reporting flow for this repository:
 
-<https://github.com/skh2945932142/omp-switch/security/advisories/new>
+<https://github.com/1847bell/omp-switch/security/advisories/new>
 
 If private reporting is temporarily unavailable, open a minimal public issue requesting a secure contact channel. Do not disclose the vulnerability details there.
 

@@ -4,6 +4,7 @@ export * from "./cli";
 export * from "./discovery";
 export * from "./domain";
 export * from "./gateway";
+export * from "./mcp";
 export * from "./paths";
 export * from "./project";
 export * from "./schema";

@@ -9,6 +9,7 @@ import {
   FileCheck2,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   Settings2,
   ShieldCheck,
   Sparkles,
@@ -17,7 +18,7 @@ import {
 import type { ProfileRef } from "@omp-switch/core";
 import { IconButtonTip, StyledSelect } from "../ui-primitives";
 
-export type SectionKey = "models" | "roles" | "prompts" | "skills" | "sessions" | "usage" | "gateway";
+export type SectionKey = "models" | "roles" | "prompts" | "skills" | "mcp" | "sessions" | "usage" | "gateway";
 
 export interface LeftRailProps {
   profileId: string;
@@ -28,6 +29,7 @@ export interface LeftRailProps {
   onSectionChange: (section: SectionKey) => void;
   providerCount: number;
   rolesDirty: boolean;
+  mcpDirty?: boolean;
   settingsDirty: boolean;
   errorCount: number;
   onOpenDiagnostics: () => void;
@@ -41,9 +43,10 @@ const SECTION_SHORTCUTS: Record<SectionKey, number> = {
   roles: 2,
   prompts: 3,
   skills: 4,
-  sessions: 5,
-  usage: 6,
-  gateway: 7,
+  mcp: 5,
+  sessions: 6,
+  usage: 7,
+  gateway: 8,
 };
 
 export function LeftRail({
@@ -55,6 +58,7 @@ export function LeftRail({
   onSectionChange,
   providerCount,
   rolesDirty,
+  mcpDirty = false,
   settingsDirty,
   errorCount,
   onOpenDiagnostics,
@@ -69,6 +73,7 @@ export function LeftRail({
     roles: t("nav.roles"),
     prompts: t("nav.prompts"),
     skills: t("nav.skills"),
+    mcp: t("nav.mcp"),
     sessions: t("nav.sessions"),
     usage: t("nav.usage"),
     gateway: t("nav.gateway"),
@@ -76,7 +81,7 @@ export function LeftRail({
 
   const navGroups: Array<{ title: string; items: SectionKey[] }> = [
     { title: t("nav.groupConfig"), items: ["models", "roles"] },
-    { title: t("nav.groupContent"), items: ["prompts", "skills", "sessions"] },
+    { title: t("nav.groupContent"), items: ["prompts", "skills", "mcp", "sessions"] },
     { title: t("nav.groupOps"), items: ["usage", "gateway"] },
   ];
 
@@ -125,6 +130,8 @@ export function LeftRail({
                       <FileCheck2 size={16} />
                     ) : item === "skills" ? (
                       <Sparkles size={16} />
+                    ) : item === "mcp" ? (
+                      <Plug size={16} />
                     ) : item === "sessions" ? (
                       <Activity size={16} />
                     ) : item === "usage" ? (
@@ -136,6 +143,7 @@ export function LeftRail({
                   <span>{sectionLabels[item]}</span>
                   {item === "models" ? <span className="nav-count">{providerCount}</span> : null}
                   {item === "roles" && rolesDirty ? <span className="nav-dot" title={t("settings.unsaved")} /> : null}
+                  {item === "mcp" && mcpDirty ? <span className="nav-dot" title={t("settings.unsaved")} /> : null}
                   <kbd className="nav-kbd">{SECTION_SHORTCUTS[item]}</kbd>
                 </button>
               );

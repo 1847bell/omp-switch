@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactElement } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { FileSearch } from "lucide-react";
@@ -27,8 +27,9 @@ import {
 } from "@omp-switch/shared";
 import { ModelsModule } from "./models-module";
 import { RolesModule } from "./roles-module";
-import { GatewayModule, PromptLibraryModule, SessionsModule, SurfaceModule } from "./workbench-modules";
+import { GatewayModule, McpModule, PromptLibraryModule, SessionsModule, SurfaceModule } from "./workbench-modules";
 import { UsageModule } from "./usage-module";
+import type { McpEditorHandle } from "./modules/mcp/mcp-module";
 import { TopBar } from "./components/navigation/topbar";
 import { LeftRail, type SectionKey } from "./components/navigation/left-rail";
 import { ProviderDrawer } from "./components/drawers/provider-drawer";
@@ -144,6 +145,8 @@ export default function App(): ReactElement {
   const [section, setSection] = useState<SectionKey>("models");
   const [promptView, setPromptView] = useState<"library" | "profile">("library");
   const [query, setQuery] = useState("");
+  const [mcpDirty, setMcpDirty] = useState(false);
+  const mcpEditor = useRef<McpEditorHandle>(null);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
@@ -631,7 +634,7 @@ export default function App(): ReactElement {
   }
 
   function confirmDiscardThen(action: () => void): void {
-    if (!rolesDirty && !settingsDirty) {
+    if (!rolesDirty && !settingsDirty && !mcpDirty) {
       action();
       return;
     }
@@ -657,7 +660,8 @@ export default function App(): ReactElement {
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        void saveDirty();
+        if (section === "mcp") mcpEditor.current?.save();
+        else void saveDirty();
         return;
       }
       if (event.key === "?" && !isInput) {
@@ -665,8 +669,8 @@ export default function App(): ReactElement {
         setShortcutsOpen(true);
         return;
       }
-      if ((event.ctrlKey || event.metaKey) && event.key >= "1" && event.key <= "7" && !isInput) {
-        const sections: SectionKey[] = ["models", "roles", "prompts", "skills", "sessions", "usage", "gateway"];
+      if ((event.ctrlKey || event.metaKey) && event.key >= "1" && event.key <= "8" && !isInput) {
+        const sections: SectionKey[] = ["models", "roles", "prompts", "skills", "mcp", "sessions", "usage", "gateway"];
         const idx = Number(event.key) - 1;
         if (sections[idx]) {
           event.preventDefault();
@@ -676,7 +680,7 @@ export default function App(): ReactElement {
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [saveDirty]);
+  }, [saveDirty, section]);
 
   const healthLabel = readOnly
     ? t("health.readonly")
@@ -691,6 +695,7 @@ export default function App(): ReactElement {
     roles: t("nav.roles"),
     prompts: t("nav.prompts"),
     skills: t("nav.skills"),
+    mcp: t("nav.mcp"),
     sessions: t("nav.sessions"),
     usage: t("nav.usage"),
     gateway: t("nav.gateway"),
@@ -718,7 +723,7 @@ export default function App(): ReactElement {
             setDrawerOpen(true);
           }}
           onOpenPalette={() => setPaletteOpen(true)}
-          onRefresh={() => void load(profileId)}
+          onRefresh={() => { if (section === "mcp") mcpEditor.current?.refresh(); else void load(profileId); }}
           onCreateSnapshot={() => void createSnapshot()}
           localeChoice={localeChoice}
           onLocaleChange={setLocaleChoiceState}
@@ -730,9 +735,9 @@ export default function App(): ReactElement {
             setProfileDrawerOpen(true);
             setDrawerOpen(true);
           }}
-          onSaveDirty={() => void saveDirty()}
+          onSaveDirty={() => { if (section === "mcp") mcpEditor.current?.save(); else void saveDirty(); }}
           busy={busy}
-          isDirty={rolesDirty || settingsDirty}
+          isDirty={section === "mcp" ? mcpDirty : rolesDirty || settingsDirty}
         />
 
         <main className={`app-body${effectiveSidebarCompact ? " rail-compact" : ""}`}>
@@ -750,6 +755,7 @@ export default function App(): ReactElement {
             }}
             providerCount={providers.length}
             rolesDirty={rolesDirty}
+            mcpDirty={mcpDirty}
             settingsDirty={settingsDirty}
             errorCount={errorDiagnostics.length}
             onOpenDiagnostics={() => {
@@ -766,7 +772,10 @@ export default function App(): ReactElement {
           />
 
           <section className={`workspace-main ${isDrawerActive ? "drawer-active" : ""}`}>
-            <div className="section-view" key={section}>
+            <div hidden={section !== "mcp"}>
+              <McpModule key={profileId} api={api} profileId={profileId} readOnly={readOnly} onNotice={notify} onDirtyChange={setMcpDirty} active={section === "mcp"} editorRef={mcpEditor} />
+            </div>
+            <div className="section-view" key={section} hidden={section === "mcp"}>
               {section === "models" ? (
                 <ModelsModule
                   profileId={profileId}
@@ -832,9 +841,9 @@ export default function App(): ReactElement {
                 <SessionsModule api={api} profileId={profileId} onNotice={notify} />
               ) : section === "usage" ? (
                 <UsageModule api={api} profileId={profileId} onNotice={notify} />
-              ) : (
+              ) : section === "gateway" ? (
                 <GatewayModule api={api} profileId={profileId} readOnly={readOnly} onNotice={notify} providers={providers} />
-              )}
+              ) : null}
             </div>
           </section>
 
@@ -1015,9 +1024,9 @@ export default function App(): ReactElement {
           }}
           actions={[
             { id: "new-provider", label: t("palette.newProvider"), run: beginAdd },
-            { id: "save-all", label: t("palette.saveAll"), run: () => { void saveDirty(); } },
+            { id: "save-all", label: t("palette.saveAll"), run: () => { if (section === "mcp") mcpEditor.current?.save(); else void saveDirty(); } },
             { id: "snapshot", label: t("palette.snapshot"), run: () => { void createSnapshot(); } },
-            { id: "reload", label: t("palette.reload"), run: () => { void load(profileId); } },
+            { id: "reload", label: t("palette.reload"), run: () => { if (section === "mcp") mcpEditor.current?.refresh(); else void load(profileId); } },
             { id: "help", label: t("palette.help"), run: () => setShortcutsOpen(true) },
           ]}
         />

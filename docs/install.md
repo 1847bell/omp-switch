@@ -26,25 +26,25 @@ so it manages configuration, not secrets.
 
 ## Windows: desktop app
 
-Availability differs per channel, so the table says what actually works today rather than what is
-planned:
+These addresses target the `1847bell/omp-switch` fork. GitHub does not copy upstream release assets,
+container images, or signing secrets when forking; publish and verify this fork's artifacts first.
 
 | Channel | Status |
 | --- | --- |
-| Direct download (GitHub Releases) | **Works** — Windows exe/zip, Linux AppImage/deb/rpm |
-| Scoop (bucket hosted in this repository) | **Works** — auto-syncs on every release |
-| winget | **Listed** (`skh2945932142.OMPSwitch`); latest merged is 0.9.0 ([#446675](https://github.com/microsoft/winget-pkgs/pull/446675)); v1.0.0 submission follows release publication |
-| Chocolatey | Package prepared; feed submission and moderation **pending** |
+| Direct download (GitHub Releases) | Requires this fork's published exe/zip or AppImage/deb/rpm assets |
+| Scoop (bucket hosted in this repository) | Requires this fork's published portable ZIP and refreshed hash |
+| winget | `skh2945932142.OMPSwitch` identifies the upstream package, not a verified fork release |
+| Chocolatey | Templates prepared; this fork's feed availability is unverified |
 
 The winget and Chocolatey manifests live in `packaging/` and are rendered with real release hashes by
-`pnpm render:packaging`. `choco install` will not find the package until the Chocolatey submission is
-accepted; use Scoop or the direct download. `winget install` works, but installs the latest version
-winget has merged, which can trail the GitHub release.
+`pnpm render:packaging`. Existing upstream winget/Chocolatey entries do not automatically switch to
+this fork. Do not submit the fork under an upstream package identity without coordinating ownership.
+For Scoop, refresh the bucket against actual fork release assets before using it.
 
 ### Scoop
 
 ```powershell
-scoop bucket add omp-switch https://github.com/skh2945932142/omp-switch
+scoop bucket add omp-switch https://github.com/1847bell/omp-switch
 scoop install omp-switch
 ```
 
@@ -53,7 +53,7 @@ This installs the portable build and puts `omp-switch-cli.exe` on PATH.
 ### Direct download
 
 Download the installer (`OMP-Switch-Setup-<version>.exe`) or the portable build
-(`OMP-Switch-<version>-win.zip`) from the [latest release](https://github.com/skh2945932142/omp-switch/releases/latest).
+(`OMP-Switch-<version>-win.zip`) from the [latest release](https://github.com/1847bell/omp-switch/releases/latest).
 The installer is per-user and does not need administrator rights. The binaries are not code-signed,
 so SmartScreen will warn; check them before running.
 
@@ -70,7 +70,7 @@ sha256sum OMP-Switch-<version>-linux.AppImage
 Releases also carry GitHub build-provenance attestations. With the GitHub CLI installed:
 
 ```bash
-gh attestation verify OMP-Switch-Setup-<version>.exe --repo skh2945932142/omp-switch
+gh attestation verify OMP-Switch-Setup-<version>.exe --repo 1847bell/omp-switch
 ```
 
 ---
@@ -80,11 +80,11 @@ gh attestation verify OMP-Switch-Setup-<version>.exe --repo skh2945932142/omp-sw
 ### Docker
 
 ```bash
-docker pull ghcr.io/skh2945932142/omp-switch-cli:1.0.0
-docker run --rm -v "$HOME/.omp:/home/node/.omp"   ghcr.io/skh2945932142/omp-switch-cli:1.0.0 validate --profile default
+docker pull ghcr.io/1847bell/omp-switch-cli:1.0.0
+docker run --rm -v "$HOME/.omp:/home/node/.omp"   ghcr.io/1847bell/omp-switch-cli:1.0.0 validate --profile default
 ```
 
-`:latest` also tracks the newest release.
+These commands require this fork's published image/tag. `:latest` tracks its newest published image.
 
 > **The published image may still be private.** GitHub creates container packages as private and
 > visibility is a repository-settings toggle, not something the release workflow can set. If the pull

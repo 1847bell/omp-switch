@@ -6,7 +6,7 @@
 
 OMP Switch 编辑的是用户自己的文件，不是它自己的。所以：
 
-- 目标文件是 `~/.omp/agent/models.yml` 和 `~/.omp/agent/config.yml`，路径会跟随 `PI_CONFIG_DIR`、`OMP_PROFILE`、`PI_PROFILE`、`PI_CODING_AGENT_DIR`。
+- 目标文件是当前 Profile 的 `models.yml`、`config.yml` 和主 `mcp.json`，路径会跟随 `PI_CONFIG_DIR`、`OMP_PROFILE`、`PI_PROFILE`、`PI_CODING_AGENT_DIR`。
 - 只对 YAML 的相关节点做局部修改，注释和不认识的字段原样保留。写入前会展示逐行 diff。
 - 写入前核对文件哈希，写入前留快照。发现文件被外部改动，就拒绝写入，请你重新载入。
 - 遇到没验证过的 OMP 大版本（目前验证过的是 16、17、18），只读不写。
@@ -22,8 +22,12 @@ OMP Switch 编辑的是用户自己的文件，不是它自己的。所以：
 | `config.yml` 的 `compaction.modelThresholds` / `modelThresholdsEnabled` | 支持类型与校验；模型级阈值目前保留但不在 UI 编辑。OMP 接受正整数 token 数或 0–100% 百分比，按精确 provider/model 或 `*` 结尾前缀匹配。 |
 | `config.yml` 的 `retry.waitForUsageReset` / `usageAwareFallback` / `usageReservePct` / `usageReservePolicy` | 支持类型与校验；配置可保留，当前 UI 只编辑 fallback chains。usage-aware fallback 是 OMP 自己的账号/配额路由，不表示 OMP Switch 管理 OAuth token。 |
 | `config.yml` 的 `gc.stale`、`tools.artifactMaxBytes` | 会校验取值，但界面里还不能编辑；已有的值会原样保留。 |
+| Profile 的主 `mcp.json` | 按 `mcpServers` 条目新增、编辑、重命名和删除；Key 与 Object 分开输入。校验、diff 确认、哈希保护和写前快照；仅局部替换目标条目，保留其他条目、根字段和未知字段。不迁移 `.mcp.json`，不修改项目或其他工具的配置。 |
 | `agent.db`、OAuth 凭据 | 不读、不写、不改。 |
 | API key | 不进入 `models.yml`。配置里只写一条取回 key 的命令。 |
+| MCP 的 `env` / `headers` / `auth` / `oauth` | 作为原始配置保留，可能含有敏感值；不解析引用、不执行命令、不连接服务、不读取 `agent.db`。建议使用环境变量或命令引用而非明文密钥。 |
+
+MCP 文件格式与 Profile 路径已对照 [OMP v18.8.7 MCP 文档](https://github.com/can1357/oh-my-pi/blob/v18.8.7/docs/mcp-config.md) 核实。默认目标为 `~/.omp/agent/mcp.json`，命名 Profile 为 `~/.omp/profiles/<name>/agent/mcp.json`。MCP 快照保存在应用数据目录的 `mcp-snapshots/mcp/<profile>/`，每个 Profile 最多保留 30 份；目前不接入 models/config 的快照恢复界面。
 
 ## 3. 预设和模型发现
 

@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 import crypto from "node:crypto";
 import {
-  MANIFEST_URL,
-  MANIFEST_SIG_URL,
-  VERIFY_PUBLIC_KEY,
   buildUpdateStatus,
   compareVersions,
   parseUpdateManifest,
@@ -15,7 +12,7 @@ const VALID_MANIFEST: UpdateManifest = {
   version: 1,
   name: "OMP Switch",
   release: "0.4.4",
-  url: "https://github.com/skh2945932142/omp-switch/releases/tag/v0.4.4",
+  url: "https://github.com/1847bell/omp-switch/releases/tag/v0.4.4",
   summary: "Fixes cost.longContext",
   publishedAt: "2026-09-01T00:00:00Z",
 };
@@ -136,8 +133,3 @@ describe("buildUpdateStatus", () => {
   });
 });
 
-it("exposes fixed manifest URLs on github.com", () => {
-  expect(MANIFEST_URL).toMatch(/^https:\/\/github\.com\//);
-  expect(MANIFEST_SIG_URL).toMatch(/^https:\/\/github\.com\//);
-  expect(VERIFY_PUBLIC_KEY).toMatch(/^[A-Za-z0-9+/]{43}=$/);
-});

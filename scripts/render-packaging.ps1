@@ -96,7 +96,7 @@ foreach ($template in Get-ChildItem -Path $templateRoot -Recurse -File -Include 
   if ($relative -eq (Join-Path "scoop" "omp-switch.json")) {
     $manifest = $content | ConvertFrom-Json
     $manifest.version = $version
-    $manifest.architecture."64bit".url = "https://github.com/skh2945932142/omp-switch/releases/download/v$version/$portableUrlName"
+    $manifest.architecture."64bit".url = "https://github.com/1847bell/omp-switch/releases/download/v$version/$portableUrlName"
     $manifest.architecture."64bit".hash = $portable.Hash
     $content = $manifest | ConvertTo-Json -Depth 10
   }
@@ -112,7 +112,7 @@ if ($stillTemplated) { throw "Unreplaced placeholder remains: $($stillTemplated 
 $bucketPath = Join-Path $projectRoot "bucket/omp-switch.json"
 if (Test-Path $bucketPath) {
   $bucket = Get-Content -Raw -LiteralPath $bucketPath | ConvertFrom-Json
-  $bucketUrl = "https://github.com/skh2945932142/omp-switch/releases/download/v$version/$portableUrlName"
+  $bucketUrl = "https://github.com/1847bell/omp-switch/releases/download/v$version/$portableUrlName"
   if ($bucket.version -eq $version -and $bucket.architecture."64bit".url -eq $bucketUrl -and $bucket.architecture."64bit".hash -eq $portable.Hash) {
     Write-Host "unchanged : bucket/omp-switch.json already matches the published asset"
   } else {

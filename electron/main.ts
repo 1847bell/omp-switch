@@ -14,6 +14,7 @@ import {
   OmpSurfaceAdapter,
   OmpInstallation,
   OmpFilesystemAdapter,
+  OmpMcpAdapter,
   PricingTable,
   ProjectContext,
   SessionFileCache,
@@ -52,6 +53,7 @@ import { activeUpdateChecker, initUpdateChecker, openExternalAllowed } from "./u
 const execFileAsync = promisify(execFile);
 let mainWindow: BrowserWindow | null = null;
 let adapter: OmpFilesystemAdapter;
+let mcp: OmpMcpAdapter;
 let secrets: CredentialStore;
 let metadata: MetadataStore;
 let surfaces: OmpSurfaceAdapter;
@@ -178,6 +180,12 @@ function makeAdapter(): void {
     homeDir: os.homedir(),
     snapshotDir: path.join(app.getPath("userData"), "snapshots"),
     installation: detectOmpInstallation(),
+    pathEnv: process.env,
+  });
+  mcp = new OmpMcpAdapter({
+    homeDir: adapter.homeDir,
+    snapshotDir: path.join(app.getPath("userData"), "mcp-snapshots"),
+    installation: adapter.installation,
     pathEnv: process.env,
   });
 }
@@ -320,6 +328,9 @@ function registerIpc(): void {
     await adapter.restoreSnapshot(snapshot);
     return { snapshot, config: await adapter.loadProfile(adapterProfile(profileId)) };
   });
+  ipcMain.handle("mcp:load", (_event, profileId: string) => mcp.load(profileId));
+  ipcMain.handle("mcp:preview", (_event, profileId: string, content: string, expectedHash: string | null) => mcp.preview(profileId, content, expectedHash));
+  ipcMain.handle("mcp:save", (_event, profileId: string, content: string, expectedHash: string | null) => mcp.save(profileId, content, expectedHash));
   ipcMain.handle("omp:discover", (_event, options: { baseUrl: string; apiKey?: string; headers?: Record<string, string>; timeoutMs?: number; type?: "ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm" }) => discoverModels(options));
   ipcMain.handle("catalog:list", (_event, query?: string) => {
     const overrides = metadata.getPreference<import("@omp-switch/core").ProviderPreset[]>("catalog.entries") ?? [];

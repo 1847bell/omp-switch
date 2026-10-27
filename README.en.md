@@ -50,11 +50,11 @@ On either system the key never goes into `models.yml`. The config holds only the
 Windows:
 
 ```powershell
-# winget (listed; currently up to 0.9.0 ([#446675](https://github.com/microsoft/winget-pkgs/pull/446675)); 1.0.0 submission pending)
+# winget (upstream package, not this fork's release artifacts)
 winget install skh2945932142.OMPSwitch
 
 # Scoop (this repo hosts the bucket and syncs it after every release)
-scoop bucket add omp-switch https://github.com/skh2945932142/omp-switch
+scoop bucket add omp-switch https://github.com/1847bell/omp-switch
 scoop install omp-switch
 ```
 
@@ -67,16 +67,16 @@ sudo rpm -i OMP-Switch-1.0.0-linux.rpm
 chmod +x OMP-Switch-1.0.0-linux.AppImage && ./OMP-Switch-1.0.0-linux.AppImage
 ```
 
-You can also download the Windows installer or portable build from [Releases](https://github.com/skh2945932142/omp-switch/releases/latest). The Chocolatey package is ready but hasn't been submitted to the official feed yet.
+Get this fork's installer or portable build from [Releases](https://github.com/1847bell/omp-switch/releases/latest) after the corresponding assets have been published. Chocolatey templates are prepared; this fork's feed availability has not been verified.
 
 If you only want the CLI, use Docker:
 
 ```bash
 docker run --rm -v "$HOME/.omp:/home/node/.omp" \
-  ghcr.io/skh2945932142/omp-switch-cli:1.0.0 validate --profile default
+  ghcr.io/1847bell/omp-switch-cli:1.0.0 validate --profile default
 ```
 
-The image is on GHCR, but GitHub makes new container packages private by default, and only the repository owner can change that in settings. If the pull says `unauthorized`, see [docs/install.md](docs/install.md#docker); a local `docker build` always works.
+The image above must first be built by this fork's release workflow and made public. GitHub makes new container packages private by default; only the repository owner can change visibility in settings. A local `docker build` always works; see [docs/install.md](docs/install.md#docker).
 
 Checksums, provenance checks, and the other install methods are in **[docs/install.md](docs/install.md)**.
 

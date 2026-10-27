@@ -21,6 +21,8 @@ You need Node.js 24+ and pnpm 11+, on Windows or Linux. Building the Linux packa
 
 Windows packaging also requires .NET SDK 10.0 and the Visual Studio "Desktop development with C++" workload, because the secret bridge is published as a Native AOT console executable. Cold start matters there: OMP resolves an `!command` API key reference with a hard 10-second timeout and silently omits the key when the command is slower, so do not trade bridge startup time away.
 
+For a Windows portable-only test build, run `pnpm package:win:portable`. It deletes the previous `dist/` contents before building and emits `dist/OMP-Switch-<version>-win.zip` without an NSIS installer. `pnpm verify:package-cli` checks both the unpacked app and the CLI extracted from that ZIP. The release-oriented `pnpm package:win` still builds both formats.
+
 ## Pull Requests
 
 1. Create a focused branch from `main`.

@@ -10,6 +10,8 @@ This document describes the release process for a supported version, beginning w
 - A clean Windows environment has validated installation, portable launch, OMP config loading, snapshots, secret bridge behavior, CLI JSON output, and upgrade/uninstall behavior. The nightly `windows-install-regression.yml` covers the install/upgrade/uninstall part.
 - The Linux packages have been smoke-tested: the AppImage starts, and the `.deb` / `.rpm` install cleanly. Building them needs `rpmbuild` (`sudo apt-get install rpm` on Debian/Ubuntu); both CI and the release workflow install it.
 - The release signer has reviewed the intended GitHub Release assets.
+- This fork publishes from `1847bell/omp-switch`. Forking does not copy release assets, container images, or Actions secrets. Refresh Scoop hashes from the fork's actual published ZIP; the inherited hash is not proof of a rebuilt artifact.
+- Signed update checks now target this fork. Before releasing signed manifests, configure your own `OMP_UPDATE_ED25519` secret and replace the matching public key in both `packages/core/src/update.ts` and the workflow verification step. Never reuse an upstream private key or disable signature verification.
 
 ## Prepare the Tag
 
