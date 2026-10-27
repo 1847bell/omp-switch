@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
+  SessionDeleteResult,
   SessionFileCache,
   SessionIndexEntry,
   SessionMessagePage,
@@ -364,6 +365,7 @@ export async function quickDiscoverSessionDirectory(
           reused.summary.stale = false;
           reused.summary.fileSize = stat.size;
           reused.mtimeMs = stat.mtimeMs;
+          reused.fileIdentity = fileIdentity(stat);
           caches.push(reused);
           stats.reused += 1;
           continue;
@@ -374,6 +376,7 @@ export async function quickDiscoverSessionDirectory(
           reused.summary.stale = false;
           reused.summary.fileSize = stat.size;
           reused.mtimeMs = stat.mtimeMs;
+          reused.fileIdentity = fileIdentity(stat);
           caches.push(reused);
           stats.reused += 1;
           continue;
@@ -385,6 +388,7 @@ export async function quickDiscoverSessionDirectory(
           relativePath,
           fileSize: stat.size,
           mtimeMs: stat.mtimeMs,
+          fileIdentity: fileIdentity(stat),
           headHash: hash,
           completeBytes: 0,
           invalidLines: 0,
@@ -480,6 +484,7 @@ async function indexOneFile(
     reused.summary.stale = false;
     reused.summary.indexStatus = "ready";
     reused.mtimeMs = before.mtimeMs;
+    reused.fileIdentity = fileIdentity(before);
     return { cache: reused, mode: "reused", scannedBytes: 0, invalidLines: 0 };
   }
   const currentHead = await headHash(filePath);
@@ -488,6 +493,7 @@ async function indexOneFile(
     const reused = cloneCache(previous);
     reused.summary.fileSize = before.size;
     reused.mtimeMs = before.mtimeMs;
+    reused.fileIdentity = fileIdentity(before);
     reused.summary.stale = false;
     reused.summary.indexStatus = "ready";
     return { cache: reused, mode: "reused", scannedBytes: 0, invalidLines: 0 };
@@ -514,6 +520,7 @@ async function indexOneFile(
   cache.usage = compressUsage(cache);
   cache.fileSize = before.size;
   cache.mtimeMs = before.mtimeMs;
+  cache.fileIdentity = fileIdentity(before);
   cache.headHash = currentHead;
   cache.completeBytes = parsed.completeBytes;
   cache.invalidLines = append && previous ? previous.invalidLines + parsed.invalidLines : parsed.invalidLines;
@@ -829,6 +836,73 @@ function matchesCacheFingerprint(stat: { size: number; mtimeMs: number }, hash: 
 function isWithinDirectory(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return Boolean(relative) && !relative.startsWith(".." + path.sep) && relative !== ".." && !path.isAbsolute(relative);
+}
+
+function fileIdentity(stat: { dev: number; ino: number; birthtimeMs: number }): NonNullable<SessionFileCache["fileIdentity"]> {
+  return { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs };
+}
+
+export async function deleteSessionFiles(
+  rootDir: string,
+  caches: SessionFileCache[],
+  sessionIds: string[],
+  trashItem: (filePath: string) => Promise<void>,
+): Promise<SessionDeleteResult> {
+  const result: SessionDeleteResult = { deletedIds: [], failures: [] };
+  const byId = new Map(caches.map((cache) => [cache.id, cache]));
+  for (const id of new Set(sessionIds)) {
+    let movingToTrash = false;
+    try {
+      if (typeof id !== "string" || !/^s_[0-9a-f]{24}$/.test(id)) throw new Error("Invalid session ID");
+      const cache = byId.get(id);
+      if (!cache) throw new Error("Session is not indexed in this profile");
+      const filePath = assertSessionPath(rootDir, cache.relativePath);
+      if (stableSessionId(cache.profile, cache.relativePath) !== id) throw new Error("Session ID does not match cached path");
+      const root = path.resolve(rootDir);
+      let missing = false;
+      let current = root;
+      for (const part of ["", ...path.relative(root, filePath).split(path.sep)]) {
+        current = path.join(current, part);
+        try {
+          const stat = await fs.lstat(current);
+          if (stat.isSymbolicLink()) throw new Error("Session symlinks are not allowed");
+          if (current !== filePath && !stat.isDirectory()) throw new Error("Session parent is not a directory");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          missing = true;
+          break;
+        }
+      }
+      if (!missing) {
+        const resolvedRoot = await fs.realpath(root);
+        const resolvedFile = await fs.realpath(filePath);
+        if (!isWithinDirectory(resolvedRoot, resolvedFile)) throw new Error("Session file escapes profile root");
+        const before = await fs.lstat(filePath);
+        if (!before.isFile() || before.isSymbolicLink()) throw new Error("Session path is not a regular file");
+        const identity = cache.fileIdentity;
+        if (!identity || before.dev !== identity.dev || before.ino !== identity.ino || before.birthtimeMs !== identity.birthtimeMs
+          || !matchesCacheFingerprint(before, await headHash(filePath), cache)) {
+          throw new Error("Session file changed; refresh the index");
+        }
+        const after = await fs.lstat(filePath);
+        if (!after.isFile() || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino
+          || after.birthtimeMs !== before.birthtimeMs || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+          throw new Error("Session file changed before deletion");
+        }
+        movingToTrash = true;
+        await trashItem(filePath);
+      }
+      result.deletedIds.push(id);
+    } catch (error) {
+      const message = movingToTrash
+        ? "Could not move session to system trash; close OMP and try again"
+        : (error as NodeJS.ErrnoException).code
+        ? "Session file could not be accessed; refresh the index"
+        : error instanceof Error ? error.message : "Session deletion failed";
+      result.failures.push({ id, message });
+    }
+  }
+  return result;
 }
 
 export async function readSessionMessages(

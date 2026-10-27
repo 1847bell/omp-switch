@@ -258,6 +258,13 @@
 .session-search-bar input { width: 100%; min-width: 0; height: 26px; padding: 0 4px; border: 0; color: var(--ink); background: transparent; font-size: var(--fs-small); }
 .session-search-bar input:focus { outline: none; }
 .session-search-icon { color: var(--muted); flex-shrink: 0; }
+.session-selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px; border-bottom: 1px solid var(--hairline); }
+.session-selection-label { display: flex; align-items: center; gap: 8px; font-size: var(--fs-small); }
+.session-selection-bar > .muted-line { flex-basis: 100%; font-size: var(--fs-micro); }
+.session-row-selection { flex-shrink: 0; }
+.session-row-shell { display: flex; align-items: center; gap: 6px; padding-inline: 10px; border-bottom: 1px solid var(--hairline); }
+.session-row-shell.active { background: var(--selected); }
+.session-row-shell > .session-row { flex: 1; min-width: 0; border-bottom: 0; }
 .session-row { min-height: 42px; }
 .session-row.active { background: var(--selected); }
 .session-detail { min-height: 420px; }

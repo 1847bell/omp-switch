@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync as SqliteDatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { MetadataStore } from "./metadata-store";
 import type { GatewayPool, SessionFileCache } from "@omp-switch/core";
@@ -126,6 +127,61 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
     await store.replaceSessionCaches("default", [sessionCache("four", "default", 4)]);
     expect(store.listSessionSummaries("default").map((summary) => summary.id)).toEqual(["four"]);
     expect(store.listSessionSummaries("work").map((summary) => summary.id)).toEqual(["three"]);
+  });
+
+  it("removes selected cache, usage and search rows without touching other profiles", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.replaceSessionCaches("default", [sessionCache("one"), sessionCache("two", "default", 2)]);
+    await store.replaceSessionCaches("work", [sessionCache("three", "work", 3)]);
+    store.indexSessionMessagesForFts("default", "one", [{ text: "deletionneedle" }]);
+    store.indexSessionMessagesForFts("default", "two", [{ text: "deletionneedle" }]);
+    store.indexSessionMessagesForFts("work", "one", [{ text: "deletionneedle" }]);
+    expect(store.hasSessionCache("default", "one")).toBe(true);
+    expect(store.hasSessionCache("work", "one")).toBe(false);
+    if (backend === "auto") {
+      expect(store.activeBackend).toBe("sqlite");
+      expect(store.searchSessionFts("default", "deletionneedle")).toHaveLength(2);
+    }
+    await store.removeSessions("default", ["one", "one", "three", "missing"]);
+    expect(store.hasSessionCache("default", "one")).toBe(false);
+    expect(store.hasSessionCache("default", "two")).toBe(true);
+    expect(store.listSessionUsage("default").map((usage) => usage.sessionId)).toEqual(["two"]);
+    expect(store.listSessionSummaries("work").map((summary) => summary.id)).toEqual(["three"]);
+    expect(store.hasIndexedSession("default", "one")).toBe(false);
+    if (backend === "auto") {
+      expect(store.searchSessionFts("default", "deletionneedle").map((row) => row.sessionId)).toEqual(["two"]);
+      expect(store.searchSessionFts("work", "deletionneedle").map((row) => row.sessionId)).toEqual(["one"]);
+    } else {
+      expect(store.searchSessionFts("default", "deletionneedle")).toEqual([]);
+    }
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    await reopened.init();
+    openStores.push(reopened);
+    expect(reopened.hasSessionCache("default", "one")).toBe(false);
+    expect(reopened.listSessionUsage("default").map((usage) => usage.sessionId)).toEqual(["two"]);
+    expect(reopened.hasSessionCache("work", "three")).toBe(true);
+  });
+
+  it("rolls back cache, usage and FTS removal together on SQLite failure", async () => {
+    if (backend !== "auto") return;
+    const { root, store } = await makeStore(backend);
+    expect(store.activeBackend).toBe("sqlite");
+    await store.replaceSessionCaches("default", [sessionCache("one")]);
+    store.indexSessionMessagesForFts("default", "one", [{ text: "rollbackneedle" }]);
+    const db = new SqliteDatabaseSync(path.join(root, "metadata.sqlite"));
+    try {
+      db.exec("CREATE TRIGGER reject_session_delete BEFORE DELETE ON session_cache BEGIN SELECT RAISE(ABORT, 'delete blocked'); END;");
+      await expect(store.removeSessions("default", ["one"])).rejects.toThrow("delete blocked");
+      expect(store.hasSessionCache("default", "one")).toBe(true);
+      expect(store.listSessionUsage("default").map((usage) => usage.sessionId)).toEqual(["one"]);
+      expect(store.searchSessionFts("default", "rollbackneedle").map((row) => row.sessionId)).toEqual(["one"]);
+      db.exec("DROP TRIGGER reject_session_delete");
+      await store.removeSessions("default", ["one"]);
+      expect(store.hasSessionCache("default", "one")).toBe(false);
+    } finally {
+      db.close();
+    }
   });
 
   it("stores preferences of every JSON shape", async () => {

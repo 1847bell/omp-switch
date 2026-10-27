@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell } from "electron";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -21,6 +21,7 @@ import {
   Snapshot,
   buildPricingTable,
   collectReferencedCredentialIds,
+  deleteSessionFiles,
   detectOmpInstallation,
   describeOverlayPrecedence,
   discoverModels,
@@ -167,7 +168,7 @@ async function backgroundIndexSessionsFts(profile: string, rootDir: string, cach
     if (!metadata.hasIndexedSession(profile, cache.id)) {
       try {
         const page = await readSessionMessages(rootDir, cache, { limit: 100 });
-        metadata.indexSessionMessagesForFts(profile, cache.id, page.messages);
+        if (metadata.hasSessionCache(profile, cache.id)) metadata.indexSessionMessagesForFts(profile, cache.id, page.messages);
       } catch {
         // Continue indexing
       }
@@ -399,6 +400,21 @@ function registerIpc(): void {
       nextCursor: nextIndex < sessions.length ? rememberListCursor(profile, nextIndex) : undefined,
     };
   });
+  ipcMain.handle("session:delete", async (_event, profileId: string, sessionIds: string[]) => {
+    const profile = safeSessionProfileId(profileId);
+    if (!Array.isArray(sessionIds) || sessionIds.length === 0) throw new Error("Select at least one session");
+    const ids = sessionIds.map(safeSessionId);
+    return sessionRefreshTasks.runExclusive(profile, async () => {
+      const root = path.join(adapterProfile(profile).agentDir, "sessions");
+      const result = await deleteSessionFiles(root, metadata.listSessionCaches(profile), ids, (file) => shell.trashItem(file));
+      if (result.deletedIds.length) {
+        await metadata.removeSessions(profile, result.deletedIds);
+        for (const [token, cursor] of sessionListCursors) if (cursor.profile === profile) sessionListCursors.delete(token);
+        for (const [token, cursor] of sessionMessageCursors) if (cursor.profile === profile) sessionMessageCursors.delete(token);
+      }
+      return result;
+    });
+  });
   ipcMain.handle("session:messages", async (_event, profileId: string, sessionId: string, options: { limit?: number; cursor?: string } = {}) => {
     const profile = safeSessionProfileId(profileId);
     const id = safeSessionId(sessionId);
@@ -407,6 +423,7 @@ function registerIpc(): void {
     const ref = adapterProfile(profile);
     const cursor = consumeMessageCursor(profile, id, options?.cursor);
     const page = await readSessionMessages(path.join(ref.agentDir, "sessions"), cache, { limit: 50, cursor });
+    if (!metadata.hasSessionCache(profile, id)) throw new Error("Session was deleted");
     const isPagination = Boolean(options?.cursor);
     if (isPagination) {
       metadata.appendSessionMessagesForFts(profile, id, page.messages);

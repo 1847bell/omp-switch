@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { ConfigPatch, DiscoveryResult, EffectiveConfig, GatewayPool, GatewayUpstreamHealth, ManagedSurfaceEntry, ProfileRef, SessionListPage, SessionMessagePage, SessionRefreshStats, SessionSearchResult, Snapshot, SurfaceBundle, UpdateStatus } from "@omp-switch/core";
 
 import type { McpConfigFile, McpConfigPreview } from "@omp-switch/core";
+import type { SessionDeleteResult } from "@omp-switch/core";
 const api = {
   getInfo: () => ipcRenderer.invoke("app:info"),
   setTheme: (theme: "light" | "dark" | "system") => ipcRenderer.invoke("app:set-theme", theme),
@@ -42,6 +43,7 @@ const api = {
   importSurfaces: (profileId: string, bundle: SurfaceBundle): Promise<ManagedSurfaceEntry[]> => ipcRenderer.invoke("surface:import", profileId, bundle),
   refreshSessions: (profileId: string, options: { rebuild?: boolean } = {}): Promise<SessionRefreshStats> => ipcRenderer.invoke("session:refresh", profileId, options),
   listSessions: (profileId: string, options: { limit?: number; cursor?: string } = {}): Promise<SessionListPage> => ipcRenderer.invoke("session:list", profileId, options),
+  deleteSessions: (profileId: string, sessionIds: string[]): Promise<SessionDeleteResult> => ipcRenderer.invoke("session:delete", profileId, sessionIds),
   searchSessionFts: (profileId: string, query: string, limit?: number): Promise<SessionSearchResult[]> => ipcRenderer.invoke("session:search-fts", profileId, query, limit),
   readSessionMessages: (profileId: string, id: string, options: { cursor?: string } = {}): Promise<SessionMessagePage> => ipcRenderer.invoke("session:messages", profileId, id, options),
   usageSummary: (profileId = "default", options: { from?: string; to?: string; reindex?: boolean } = {}) => ipcRenderer.invoke("usage:summary", profileId, options),

@@ -358,6 +358,36 @@ export class MetadataStore {
     }
   }
 
+  async removeSessions(profile: string, ids: string[]): Promise<void> {
+    const selected = new Set(ids);
+    if (!selected.size) return;
+    if (!this.sqlite) {
+      this.fallback.sessionCaches = this.fallback.sessionCaches.filter((cache) => cache.profile !== profile || !selected.has(cache.id));
+      await this.persistFallback();
+      return;
+    }
+    this.sqlite.exec("BEGIN IMMEDIATE");
+    try {
+      const deleteCache = this.sqlite.prepare("DELETE FROM session_cache WHERE profile = ? AND id = ?");
+      const deleteUsage = this.sqlite.prepare("DELETE FROM session_usage WHERE profile = ? AND session_id = ?");
+      const deleteFts = this.hasFts ? this.sqlite.prepare("DELETE FROM session_fts WHERE profile = ? AND session_id = ?") : undefined;
+      for (const id of selected) {
+        deleteFts?.run(profile, id);
+        deleteUsage.run(profile, id);
+        deleteCache.run(profile, id);
+      }
+      this.sqlite.exec("COMMIT");
+    } catch (error) {
+      this.sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  hasSessionCache(profile: string, id: string): boolean {
+    if (!this.sqlite) return this.fallback.sessionCaches.some((cache) => cache.profile === profile && cache.id === id);
+    return Boolean(this.sqlite.prepare("SELECT 1 FROM session_cache WHERE profile = ? AND id = ? LIMIT 1").get(profile, id));
+  }
+
   listSessionCaches(profile: string): SessionFileCache[] {
     if (!this.sqlite) {
       return sortCaches(this.fallback.sessionCaches.filter((cache) => cache.profile === profile).map(cloneCache));

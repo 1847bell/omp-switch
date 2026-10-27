@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   Archive,
@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import type {
@@ -25,6 +26,7 @@ import type {
 import { useTranslation } from "react-i18next";
 import { formatDateTime, formatClock } from "../../locale";
 import { IconButton } from "../../components/ui-primitives";
+import { ConfirmDialog } from "../../components/save-flow";
 import {
   generateSessionHtml,
   generateSessionJson,
@@ -191,7 +193,7 @@ function triggerDownload(filename: string, content: string, type = "text/plain;c
   URL.revokeObjectURL(url);
 }
 
-export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps): ReactElement {
+export function SessionsModule({ api, profileId, readOnly, onNotice }: SessionsModuleProps): ReactElement {
   const { t } = useTranslation();
   const [entries, setEntries] = useState<SessionSummary[]>([]);
   const [selected, setSelected] = useState<SessionSummary | null>(null);
@@ -205,33 +207,62 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
   const [searchQuery, setSearchQuery] = useState("");
   const [ftsResults, setFtsResults] = useState<SessionSearchResult[]>([]);
   const [ftsActive, setFtsActive] = useState(false);
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [deleteTargets, setDeleteTargets] = useState<SessionSummary[]>([]);
+  const [deleting, setDeleting] = useState(false);
+  const [searchRevision, setSearchRevision] = useState(0);
+  const profileScope = useRef({ profileId, generation: 0 });
+  if (profileScope.current.profileId !== profileId) {
+    profileScope.current = { profileId, generation: profileScope.current.generation + 1 };
+  }
+  const busy = loading || deleting;
 
   async function refresh(rebuild = false): Promise<void> {
+    const scope = profileScope.current;
     setLoading(true);
     try {
       const stats = await api.refreshSessions(profileId, { rebuild });
-      setRefreshStats(stats);
+      if (scope !== profileScope.current) return;
       const firstPage = await api.listSessions(profileId, { limit: 50 });
+      if (scope !== profileScope.current) return;
+      const usage = await api.usageSummary(profileId);
+      if (scope !== profileScope.current) return;
+      setRefreshStats(stats);
       setEntries(firstPage.sessions);
       setListCursor(firstPage.nextCursor);
-      const usage = await api.usageSummary(profileId);
       setInvalidLines(usage.invalidLines);
-      if (selected) {
-        const found = firstPage.sessions.find((s) => s.id === selected.id);
-        if (found) setSelected(found);
-      }
+      setCheckedIds((ids) => new Set([...ids].filter((id) => firstPage.sessions.some((entry) => entry.id === id))));
+      setSearchRevision((value) => value + 1);
     } catch (error) {
-      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      if (scope === profileScope.current) onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setLoading(false);
+      if (scope === profileScope.current) setLoading(false);
     }
   }
 
-  useEffect(() => { void refresh(); }, [profileId]);
+  useEffect(() => {
+    setEntries([]);
+    setCheckedIds(new Set());
+    setDeleteTargets([]);
+    setDeleting(false);
+    setSelected(null);
+    setMessages([]);
+    setListCursor(undefined);
+    setMessageCursor(undefined);
+    setHasMoreMessages(false);
+    setRefreshStats(null);
+    setInvalidLines(0);
+    setSearchQuery("");
+    setFtsResults([]);
+    setFtsActive(false);
+    void refresh();
+  }, [profileId]);
 
   // Full-text search trigger
   useEffect(() => {
     const query = searchQuery.trim();
+    const scope = profileScope.current;
+    if (deleting) return;
     if (!query) {
       setFtsResults([]);
       setFtsActive(false);
@@ -241,12 +272,12 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
     const timer = setTimeout(async () => {
       try {
         const results = await api.searchSessionFts(profileId, query);
-        if (!cancelled) {
+        if (!cancelled && scope === profileScope.current) {
           setFtsResults(results);
           setFtsActive(true);
         }
       } catch {
-        if (!cancelled) setFtsResults([]);
+        if (!cancelled && scope === profileScope.current) setFtsResults([]);
       }
     }, 200);
 
@@ -254,49 +285,62 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [searchQuery, profileId, api]);
+  }, [searchQuery, profileId, api, searchRevision, deleting]);
 
   async function loadMoreSessions(): Promise<void> {
-    if (!listCursor || loading) return;
+    if (!listCursor || busy) return;
+    const scope = profileScope.current;
     setLoading(true);
     try {
       const page = await api.listSessions(profileId, { cursor: listCursor, limit: 50 });
-      setEntries((prev) => [...prev, ...page.sessions]);
+      if (scope !== profileScope.current) return;
+      setEntries((previous) => {
+        const loadedIds = new Set(previous.map((entry) => entry.id));
+        return [...previous, ...page.sessions.filter((entry) => !loadedIds.has(entry.id))];
+      });
       setListCursor(page.nextCursor);
     } catch (error) {
-      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      if (scope === profileScope.current) onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setLoading(false);
+      if (scope === profileScope.current) setLoading(false);
     }
   }
 
   async function openEntry(entry: SessionSummary): Promise<void> {
+    if (busy) return;
+    const scope = profileScope.current;
+    setMessages([]);
+    setMessageCursor(undefined);
+    setHasMoreMessages(false);
     setSelected(entry);
     setLoading(true);
     try {
       const page = await api.readSessionMessages(profileId, entry.id);
+      if (scope !== profileScope.current) return;
       setMessages(page.messages);
       setHasMoreMessages(page.hasMore);
       setMessageCursor(page.nextCursor);
     } catch (error) {
-      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      if (scope === profileScope.current) onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setLoading(false);
+      if (scope === profileScope.current) setLoading(false);
     }
   }
 
   async function loadEarlier(): Promise<void> {
-    if (!selected || !messageCursor || loading) return;
+    if (!selected || !messageCursor || busy) return;
+    const scope = profileScope.current;
     setLoading(true);
     try {
       const page = await api.readSessionMessages(profileId, selected.id, { cursor: messageCursor });
+      if (scope !== profileScope.current) return;
       setMessages((prev) => [...page.messages, ...prev]);
       setHasMoreMessages(page.hasMore);
       setMessageCursor(page.nextCursor);
     } catch (error) {
-      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      if (scope === profileScope.current) onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setLoading(false);
+      if (scope === profileScope.current) setLoading(false);
     }
   }
 
@@ -314,19 +358,90 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
     );
   }, [entries, searchQuery, ftsSessionIdSet]);
 
+  const allVisibleChecked = filteredEntries.length > 0 && filteredEntries.every((entry) => checkedIds.has(entry.id));
+
+  function toggleChecked(id: string): void {
+    setCheckedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function confirmDelete(): Promise<void> {
+    if (busy || readOnly || deleteTargets.length === 0) return;
+    const scope = profileScope.current;
+    const targets = deleteTargets;
+    let remainingTargets = targets;
+    setDeleting(true);
+    try {
+      const result = await api.deleteSessions(profileId, targets.map((entry) => entry.id));
+      if (scope !== profileScope.current) return;
+      const deleted = new Set(result.deletedIds);
+      remainingTargets = targets.filter((entry) => !deleted.has(entry.id));
+      setEntries((previous) => previous.filter((entry) => !deleted.has(entry.id)));
+      setCheckedIds((previous) => new Set([...previous, ...targets.map((entry) => entry.id)].filter((id) => !deleted.has(id))));
+      setFtsResults((previous) => previous.filter((match) => !deleted.has(match.sessionId)));
+      setListCursor(undefined);
+      if (selected && deleted.has(selected.id)) {
+        setSelected(null);
+        setMessages([]);
+        setMessageCursor(undefined);
+        setHasMoreMessages(false);
+      }
+      setDeleteTargets([]);
+      if (result.failures.length) {
+        onNotice({ tone: "error", text: t("sessions.deletePartial", { deleted: result.deletedIds.length, failed: result.failures.length }) + " " + result.failures.map((failure) => `${failure.id}: ${failure.message}`).join("; ") });
+      } else {
+        onNotice({ tone: "success", text: t("sessions.deleted", { count: result.deletedIds.length }) });
+      }
+      const stats = await api.refreshSessions(profileId);
+      if (scope !== profileScope.current) return;
+      setRefreshStats(stats);
+      const usage = await api.usageSummary(profileId);
+      if (scope !== profileScope.current) return;
+      setInvalidLines(usage.invalidLines);
+      const reloaded: SessionSummary[] = [];
+      const targetCount = Math.max(50, entries.length - result.deletedIds.length);
+      let nextCursor: string | undefined;
+      do {
+        const page = await api.listSessions(profileId, { cursor: nextCursor, limit: Math.min(100, targetCount - reloaded.length) });
+        if (scope !== profileScope.current) return;
+        reloaded.push(...page.sessions);
+        nextCursor = page.nextCursor;
+      } while (nextCursor && reloaded.length < targetCount);
+      const reloadedIds = new Set(reloaded.map((entry) => entry.id));
+      setEntries([...reloaded, ...remainingTargets.filter((entry) => !reloadedIds.has(entry.id))]);
+      setCheckedIds((previous) => new Set([...previous].filter((id) => reloadedIds.has(id) || remainingTargets.some((entry) => entry.id === id))));
+      setListCursor(nextCursor);
+    } catch (error) {
+      if (scope === profileScope.current) {
+        setCheckedIds((previous) => new Set([...previous, ...remainingTargets.map((entry) => entry.id)]));
+        setDeleteTargets([]);
+        onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      }
+    } finally {
+      if (scope === profileScope.current) {
+        setDeleting(false);
+        setSearchRevision((value) => value + 1);
+      }
+    }
+  }
+
   async function copySessionMarkdown(): Promise<void> {
-    if (!selected) return;
+    if (!selected || busy) return;
+    const scope = profileScope.current;
     const md = generateSessionMarkdown(selected, messages);
     try {
       await navigator.clipboard.writeText(md);
-      onNotice({ tone: "success", text: t("sessions.copiedMarkdown") });
+      if (scope === profileScope.current) onNotice({ tone: "success", text: t("sessions.copiedMarkdown") });
     } catch (err) {
-      onNotice({ tone: "error", text: String(err) });
+      if (scope === profileScope.current) onNotice({ tone: "error", text: String(err) });
     }
   }
 
   function downloadSession(format: "md" | "html" | "json"): void {
-    if (!selected) return;
+    if (!selected || busy) return;
     const idSnippet = selected.id.slice(0, 8);
     if (format === "html") {
       const html = generateSessionHtml(selected, messages);
@@ -358,10 +473,10 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
           <h1>{t("sessions.heading")}<span className="heading-count">{entries.length}</span></h1>
         </div>
         <div className="heading-actions">
-          <IconButton label={t("sessions.refreshIndex")} onClick={() => void refresh()} disabled={loading}>
+          <IconButton label={t("sessions.refreshIndex")} onClick={() => void refresh()} disabled={busy}>
             <RefreshCw size={16} className={loading ? "spin" : ""} />
           </IconButton>
-          <button className="secondary-button" onClick={() => void refresh(true)} disabled={loading}>
+          <button className="secondary-button" onClick={() => void refresh(true)} disabled={busy}>
             {t("sessions.rebuildIndex")}
           </button>
         </div>
@@ -396,16 +511,40 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
             <Search size={14} className="session-search-icon" />
             <input
               name="sessionSearch"
+              disabled={deleting}
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
               placeholder={t("sessions.searchSessions")}
               aria-label={t("sessions.searchSessions")}
             />
             {searchQuery ? (
-              <IconButton label={t("common.clear")} variant="subtle" onClick={() => setSearchQuery("")}>
+              <IconButton label={t("common.clear")} variant="subtle" onClick={() => setSearchQuery("")} disabled={deleting}>
                 <X size={13} />
               </IconButton>
             ) : null}
+          </div>
+          <div className="session-selection-bar">
+            <label className="check-line session-selection-label">
+              <input
+                type="checkbox"
+                name="selectVisibleSessions"
+                checked={allVisibleChecked}
+                ref={(node) => { if (node) node.indeterminate = !allVisibleChecked && filteredEntries.some((entry) => checkedIds.has(entry.id)); }}
+                disabled={busy || readOnly || filteredEntries.length === 0}
+                onChange={() => setCheckedIds((previous) => {
+                  const next = new Set(previous);
+                  for (const entry of filteredEntries) {
+                    if (allVisibleChecked) next.delete(entry.id); else next.add(entry.id);
+                  }
+                  return next;
+                })}
+              />
+              <span>{t("sessions.selectVisible", { count: filteredEntries.length })}</span>
+            </label>
+            <span className="muted-line">{t("sessions.selectionScope")}</span>
+            <button className="secondary-button danger" disabled={busy || readOnly || checkedIds.size === 0} onClick={() => setDeleteTargets(entries.filter((entry) => checkedIds.has(entry.id)))}>
+              <Trash2 size={14} />{t("sessions.deleteSelected", { count: checkedIds.size })}
+            </button>
           </div>
           {ftsActive && ftsResults.length > 0 ? (
             <div className="fts-match-banner">
@@ -432,7 +571,7 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
                 {refreshStats?.rootMissing ? t("sessions.emptyRootMissingHint") : t("sessions.emptyHint")}
               </span>
               <div className="empty-actions">
-                <button className="secondary-button" onClick={() => void refresh()} disabled={loading}>
+                <button className="secondary-button" onClick={() => void refresh()} disabled={busy}>
                   <RefreshCw size={15} />{t("sessions.scan")}
                 </button>
               </div>
@@ -442,24 +581,40 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
               {filteredEntries.map((entry) => {
                 const ftsMatch = ftsResults.find((r) => r.sessionId === entry.id);
                 return (
-                  <button
-                    key={entry.id}
-                    className={"module-list-row session-row " + (selected?.id === entry.id ? "active" : "")}
-                    onClick={() => void openEntry(entry)}
-                  >
-                    <span className="module-row-main">
-                      <strong>{entry.title ?? entry.model ?? t("sessions.unnamed")}</strong>
-                      <small>{entry.provider ?? "—"} · {formatDateTime(entry.lastActiveAt ?? entry.startedAt)} · {t("sessions.messageCount", { count: entry.messageCount })}</small>
-                      {ftsMatch ? renderSafeSnippet(ftsMatch.snippet) : null}
-                    </span>
-                    <span className={"status-chip " + (entry.stale ? "warn" : entry.failures ? "danger" : "neutral")}>
-                      {entry.stale ? t("sessions.stale") : entry.failures ? t("sessions.failures", { count: entry.failures }) : t("sessions.indexed")}
-                    </span>
-                  </button>
+                  <div key={entry.id} className={"session-row-shell " + (selected?.id === entry.id ? "active" : "")}>
+                    <label className="check-line session-row-selection">
+                      <input
+                        type="checkbox"
+                        name="sessionSelection"
+                        value={entry.id}
+                        aria-label={t("sessions.selectSession", { title: entry.title ?? entry.model ?? t("sessions.unnamed") })}
+                        checked={checkedIds.has(entry.id)}
+                        disabled={busy || readOnly}
+                        onChange={() => toggleChecked(entry.id)}
+                      />
+                    </label>
+                    <button
+                      className={"module-list-row session-row " + (selected?.id === entry.id ? "active" : "")}
+                      onClick={() => void openEntry(entry)}
+                      disabled={busy}
+                    >
+                      <span className="module-row-main">
+                        <strong>{entry.title ?? entry.model ?? t("sessions.unnamed")}</strong>
+                        <small>{entry.provider ?? "—"} · {formatDateTime(entry.lastActiveAt ?? entry.startedAt)} · {t("sessions.messageCount", { count: entry.messageCount })}</small>
+                        {ftsMatch ? renderSafeSnippet(ftsMatch.snippet) : null}
+                      </span>
+                      <span className={"status-chip " + (entry.stale ? "warn" : entry.failures ? "danger" : "neutral")}>
+                        {entry.stale ? t("sessions.stale") : entry.failures ? t("sessions.failures", { count: entry.failures }) : t("sessions.indexed")}
+                      </span>
+                    </button>
+                    <IconButton label={t("sessions.deleteSession", { title: entry.title ?? entry.model ?? t("sessions.unnamed") })} variant="danger" onClick={() => setDeleteTargets([entry])} disabled={busy || readOnly}>
+                      <Trash2 size={14} />
+                    </IconButton>
+                  </div>
                 );
               })}
               {listCursor && !searchQuery ? (
-                <button className="secondary-button full-width" onClick={() => void loadMoreSessions()} disabled={loading}>
+                <button className="secondary-button full-width" onClick={() => void loadMoreSessions()} disabled={busy}>
                   {t("sessions.loadMore")}
                 </button>
               ) : null}
@@ -475,16 +630,16 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
                   <strong>{selected.title ?? selected.model ?? t("sessions.heading")}</strong>
                 </div>
                 <div className="drawer-actions">
-                  <button className="secondary-button" onClick={() => void copySessionMarkdown()} title={t("sessions.copyMarkdown")}>
+                  <button className="secondary-button" onClick={() => void copySessionMarkdown()} title={t("sessions.copyMarkdown")} disabled={busy}>
                     <Copy size={14} />{t("sessions.copyMarkdown")}
                   </button>
-                  <IconButton label={t("sessions.downloadHtml")} onClick={() => downloadSession("html")}>
+                  <IconButton label={t("sessions.downloadHtml")} onClick={() => downloadSession("html")} disabled={busy}>
                     <FileCode size={15} />
                   </IconButton>
-                  <IconButton label={t("sessions.downloadMarkdown")} onClick={() => downloadSession("md")}>
+                  <IconButton label={t("sessions.downloadMarkdown")} onClick={() => downloadSession("md")} disabled={busy}>
                     <FileText size={15} />
                   </IconButton>
-                  <IconButton label={t("sessions.downloadJson")} onClick={() => downloadSession("json")}>
+                  <IconButton label={t("sessions.downloadJson")} onClick={() => downloadSession("json")} disabled={busy}>
                     <Download size={15} />
                   </IconButton>
                 </div>
@@ -492,7 +647,7 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
               <div className="session-messages">
                 {hasMoreMessages ? (
                   <div className="session-load-earlier">
-                    <button className="secondary-button compact" onClick={() => void loadEarlier()} disabled={loading}>
+                    <button className="secondary-button compact" onClick={() => void loadEarlier()} disabled={busy}>
                       <ChevronUp size={14} />{t("sessions.loadEarlier")}
                     </button>
                   </div>
@@ -516,6 +671,16 @@ export function SessionsModule({ api, profileId, onNotice }: SessionsModuleProps
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={deleteTargets.length > 0}
+        title={t("sessions.deleteConfirmTitle", { count: deleteTargets.length })}
+        message={t("sessions.deleteConfirmMessage", { count: deleteTargets.length, titles: deleteTargets.map((entry) => entry.title ?? entry.model ?? entry.id).join("; ") })}
+        confirmLabel={t("sessions.moveToTrash")}
+        danger
+        busy={deleting}
+        onClose={() => { if (!deleting) setDeleteTargets([]); }}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   );
 }

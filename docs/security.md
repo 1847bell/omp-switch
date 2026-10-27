@@ -148,6 +148,8 @@ may be persisted for local search, and the current export actions can include th
 previews; do not describe sessions or exports as guaranteed transcript-free. Do not share exports
 without checking their contents.
 
+Session deletion accepts profile-scoped opaque IDs, never renderer-supplied paths. Core checks the primary filename/layout, stable ID, containment, symlinks, file identity, size, mtime, and head hash before handing a file to Electron's system trash. There is no permanent-delete fallback. Refresh/rebuild and deletion are serialized per profile; successful or already-missing files have cache, usage, and FTS rows removed, while failed files remain indexed. This is not an atomic transaction with external OMP processes: stop OMP using the session first. Session attachments, project files, and OMP databases are not deleted. Trash recovery depends on the OS; restore the file and rebuild the index.
+
 ## Supply chain
 
 - Runtime dependencies are focused: `react`, `react-dom`, `@radix-ui/*`, `motion`, `cmdk`, `sonner`, `i18next`, `react-i18next`, `lucide-react`, `yaml`, `zod`.

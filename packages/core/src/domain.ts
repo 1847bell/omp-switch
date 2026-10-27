@@ -480,6 +480,11 @@ export interface SessionMessagePage {
   hasMore: boolean;
 }
 
+export interface SessionDeleteResult {
+  deletedIds: string[];
+  failures: Array<{ id: string; message: string }>;
+}
+
 /** Private cache shape: persisted by the main process, never passed to the renderer. */
 export interface SessionFileCache {
   id: string;
@@ -488,6 +493,7 @@ export interface SessionFileCache {
   fileSize: number;
   mtimeMs: number;
   headHash: string;
+  fileIdentity?: { dev: number; ino: number; birthtimeMs: number };
   completeBytes: number;
   invalidLines: number;
   summary: SessionSummary;

@@ -5,6 +5,7 @@
 ### Added
 - Added profile-scoped MCP server cards under Content → MCP, with per-entry Key/Object editing, add/rename/delete, JSON validation, diff confirmation, hash-guarded atomic saves, private snapshots, and draft-discard protection. Edits preserve unrelated JSON text and unknown fields.
 - Added `pnpm package:win:portable`, which clears previous `dist/` output and builds only the Windows portable ZIP.
+- Added single and multi-select session deletion with confirmation, system trash recovery, current-filter/loaded-row selection, and synchronized session, full-text search, and usage cleanup. Changed files are refused; partial failures remain selected for retry.
 
 ### Changed
 - Renumbered navigation and `Ctrl+1`–`Ctrl+8` in display order: Models, Roles, Prompts, Skills, MCP, Sessions, Usage, Gateway. MCP is now `Ctrl+5`.

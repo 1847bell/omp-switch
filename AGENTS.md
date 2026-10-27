@@ -37,6 +37,8 @@ The GUI save is two-step: IPC `omp:preview` renders a diff, then confirmation ca
 
 MCP uses `OmpMcpAdapter` in `packages/core/src/mcp.ts`: load → preview → save for the selected Profile's primary `agentDir/mcp.json`. Preserve exact raw JSON and unknown fields; validate, recheck the original hash, and snapshot before saving. No project/legacy migration, command execution, server connections, or OAuth-store access. The renderer's `modules/mcp/mcp-module.tsx` keeps drafts across page changes; its save/refresh actions are routed from the shell. `Ctrl+8` opens MCP without renumbering existing shortcuts.
 
+Session deletion uses `deleteSessionFiles` in core with an injected trash operation; `session:delete` resolves only current-profile opaque IDs and calls `shell.trashItem`, never permanent unlink. `SessionRefreshCoordinator.runExclusive` serializes deletion with indexing; `MetadataStore.removeSessions` clears cache/usage/FTS in both backends. Preserve file identity/fingerprint and containment checks, partial results, and post-read cache guards so asynchronous FTS work cannot recreate deleted rows. The renderer selects only visible loaded rows for select-all and confirms before deletion.
+
 ## Key Directories
 
 | Path | Purpose |

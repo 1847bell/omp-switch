@@ -1,8 +1,9 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { indexSessionJsonl, quickDiscoverSessionDirectory, readSessionMessages, refreshSessionDirectory } from "./sessions";
+import { deleteSessionFiles, indexSessionJsonl, quickDiscoverSessionDirectory, readSessionMessages, refreshSessionDirectory } from "./sessions";
 import type { SessionFileCache } from "./domain";
 
 const tempRoots: string[] = [];
@@ -115,6 +116,144 @@ function assistant(id: string, timestamp: string, content = "assistant", input =
     },
   };
 }
+
+describe("recoverable session deletion", () => {
+  async function fixture(count = 1): Promise<{ root: string; caches: SessionFileCache[] }> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-delete-fixture-"));
+    tempRoots.push(root);
+    for (let index = 0; index < count; index += 1) {
+      await fs.writeFile(path.join(root, primaryName("019f428b-2bca-7000-8c4f-" + String(index).padStart(12, "0"))), ASSISTANT_TURN + "\n");
+    }
+    return { root, caches: (await refreshSessionDirectory(root, "default")).caches };
+  }
+
+  it("deduplicates IDs, trashes only primary files and preserves partial failures", async () => {
+    const { root, caches } = await fixture(2);
+    await fs.mkdir(path.join(root, "attachments"));
+    await fs.writeFile(path.join(root, "attachments", "tool.jsonl"), "artifact");
+    await fs.writeFile(path.join(root, "agent.db"), "database");
+    const calls: string[] = [];
+    const result = await deleteSessionFiles(root, caches, [caches[0].id, caches[0].id, caches[1].id], async (file) => {
+      calls.push(file);
+      if (file === path.join(root, caches[1].relativePath)) throw new Error("trash unavailable: " + file);
+      await fs.rename(file, file + ".trashed");
+    });
+    expect(result.deletedIds).toEqual([caches[0].id]);
+    expect(result.failures.map((failure) => failure.id)).toEqual([caches[1].id]);
+    expect(result.failures[0].message).not.toContain(root);
+    expect(calls).toHaveLength(2);
+    expect(await fs.readFile(path.join(root, caches[0].relativePath) + ".trashed", "utf8")).toBe(ASSISTANT_TURN + "\n");
+    expect(await fs.readFile(path.join(root, caches[1].relativePath), "utf8")).toBe(ASSISTANT_TURN + "\n");
+    expect(await fs.readFile(path.join(root, "attachments", "tool.jsonl"), "utf8")).toBe("artifact");
+    expect(await fs.readFile(path.join(root, "agent.db"), "utf8")).toBe("database");
+  });
+
+  it("removes a stale missing-file entry without calling trash", async () => {
+    const { root, caches } = await fixture();
+    await fs.unlink(path.join(root, caches[0].relativePath));
+    const result = await deleteSessionFiles(root, caches, [caches[0].id], async () => { throw new Error("must not trash"); });
+    expect(result).toEqual({ deletedIds: [caches[0].id], failures: [] });
+  });
+
+  it("rejects changed content, replaced identity and legacy identity-less caches", async () => {
+    const { root, caches } = await fixture(3);
+    await fs.appendFile(path.join(root, caches[0].relativePath), "changed\n");
+    const replaced = path.join(root, caches[1].relativePath);
+    const original = await fs.stat(replaced);
+    await fs.rename(replaced, replaced + ".old");
+    await fs.writeFile(replaced, ASSISTANT_TURN + "\n");
+    await fs.utimes(replaced, original.atime, original.mtime);
+    delete caches[2].fileIdentity;
+    const result = await deleteSessionFiles(root, caches, caches.map((cache) => cache.id), async () => { throw new Error("must not trash"); });
+    expect(result.deletedIds).toEqual([]);
+    expect(result.failures.map((failure) => failure.id)).toEqual(caches.map((cache) => cache.id));
+    expect(await fs.readFile(replaced, "utf8")).toBe(ASSISTANT_TURN + "\n");
+  });
+
+  it("rejects unknown IDs, traversal, absolute paths, non-primary files and mismatched IDs", async () => {
+    const { root, caches } = await fixture();
+    const paths = ["../" + primaryName(), "..\\" + primaryName(), path.join(root, primaryName()), "attachments/deep/" + primaryName(), "agent.db", "oauth.json", "tool.jsonl"];
+    const malicious = paths.map((relativePath) => ({
+      ...caches[0], relativePath,
+      id: "s_" + crypto.createHash("sha256").update("default\0" + relativePath.replaceAll("\\", "/")).digest("hex").slice(0, 24),
+    }));
+    let calls = 0;
+    for (const cache of malicious) {
+      const result = await deleteSessionFiles(root, [cache], [cache.id], async () => { calls += 1; });
+      expect(result.deletedIds).toEqual([]);
+      expect(result.failures.map((failure) => failure.id)).toEqual([cache.id]);
+    }
+    const mismatch = { ...caches[0], id: "s_" + "1".repeat(24) };
+    const ids = [mismatch.id, "../bad", "s_" + "0".repeat(24)];
+    const result = await deleteSessionFiles(root, [mismatch], ids, async () => { calls += 1; });
+    expect(calls).toBe(0);
+    expect(result.deletedIds).toEqual([]);
+    expect(result.failures.map((failure) => failure.id)).toEqual(ids);
+  });
+
+  it("supports quick discovery and refreshes identity for reused caches", async () => {
+    const { root, caches } = await fixture();
+    delete caches[0].fileIdentity;
+    const quick = await quickDiscoverSessionDirectory(root, "default", caches);
+    expect(quick.caches[0].fileIdentity).toBeDefined();
+    const result = await deleteSessionFiles(root, quick.caches, [quick.caches[0].id], async (file) => {
+      await fs.rename(file, file + ".trashed");
+    });
+    expect(result).toEqual({ deletedIds: [quick.caches[0].id], failures: [] });
+  });
+
+  it("rejects a primary file replaced with a symbolic link", async (context) => {
+    const { root, caches } = await fixture();
+    const file = path.join(root, caches[0].relativePath);
+    await fs.rename(file, file + ".target");
+    try {
+      await fs.symlink(file + ".target", file, "file");
+    } catch (error) {
+      if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") { context.skip(); return; }
+      throw error;
+    }
+    let calls = 0;
+    const result = await deleteSessionFiles(root, caches, [caches[0].id], async () => { calls += 1; });
+    expect(calls).toBe(0);
+    expect(result.deletedIds).toEqual([]);
+    expect(result.failures.map((failure) => failure.id)).toEqual([caches[0].id]);
+  });
+
+  it("rejects a grouped directory redirected outside the profile root", async () => {
+    const { root, caches } = await fixture();
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "omp-delete-outside-"));
+    tempRoots.push(outside);
+    const group = path.join(root, "group");
+    await fs.mkdir(group);
+    await fs.rename(path.join(root, caches[0].relativePath), path.join(group, caches[0].relativePath));
+    const indexed = (await refreshSessionDirectory(root, "default")).caches;
+    await fs.rename(path.join(group, caches[0].relativePath), path.join(outside, caches[0].relativePath));
+    await fs.rmdir(group);
+    await fs.symlink(outside, group, process.platform === "win32" ? "junction" : "dir");
+    let calls = 0;
+    const result = await deleteSessionFiles(root, indexed, [indexed[0].id], async () => { calls += 1; });
+    expect(calls).toBe(0);
+    expect(result.failures).toHaveLength(1);
+    expect(await fs.readFile(path.join(outside, caches[0].relativePath), "utf8")).toBe(ASSISTANT_TURN + "\n");
+  });
+
+  it("rejects a grouped directory replaced by a symlink even inside the root", async () => {
+    const { root, caches } = await fixture();
+    const group = path.join(root, "group");
+    await fs.mkdir(group);
+    await fs.rename(path.join(root, caches[0].relativePath), path.join(group, caches[0].relativePath));
+    const indexed = (await refreshSessionDirectory(root, "default")).caches;
+    const moved = path.join(root, "moved");
+    await fs.rename(group, moved);
+    await fs.symlink(moved, group, process.platform === "win32" ? "junction" : "dir");
+    let calls = 0;
+    const result = await deleteSessionFiles(root, indexed, [indexed[0].id], async () => { calls += 1; });
+    expect(calls).toBe(0);
+    expect(result.deletedIds).toEqual([]);
+    expect(result.failures.map((failure) => failure.id)).toEqual([indexed[0].id]);
+    expect(await fs.readFile(path.join(moved, caches[0].relativePath), "utf8")).toBe(ASSISTANT_TURN + "\n");
+  });
+});
 
 describe("session summary refresh", () => {
   it("quickly discovers titles without retaining message offsets or indexing attachment JSONL", async () => {

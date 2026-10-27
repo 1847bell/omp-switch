@@ -7,6 +7,8 @@ import type {
   McpConfigPreview,
   PatchPreview,
   Snapshot,
+  SessionSummary,
+  UsageTokens,
 } from "@omp-switch/core";
 import { applyConfigPatch } from "@omp-switch/core/adapter";
 import { validateMcpConfig } from "@omp-switch/core/mcp";
@@ -16,6 +18,26 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
   const memory: Record<string, EffectiveConfig> = {};
   const mcpFiles = new Map<string, McpConfigFile>();
   let mcpRevision = 0;
+  const sessionProfiles = new Map<string, SessionSummary[]>();
+  const getSessions = (profileId: string): SessionSummary[] => {
+    if (!sessionProfiles.has(profileId)) sessionProfiles.set(profileId, [{
+      id: "demo-session-1",
+      profile: profileId,
+      title: "重构 provider 配置加载",
+      model: "gpt-5",
+      provider: "openai",
+      messageCount: 12,
+      requestCount: 6,
+      tokens: { input: 18420, output: 5210 },
+      cost: 0.0842,
+      failures: 0,
+      stale: false,
+      fileSize: 48211,
+      startedAt: "2026-08-21T13:42:00Z",
+      lastActiveAt: "2026-08-21T14:08:00Z",
+    }]);
+    return sessionProfiles.get(profileId)!;
+  };
   const getMcp = (profileId: string): McpConfigFile => mcpFiles.get(profileId) ?? {
     profileId,
     path: `~/.omp/${profileId === "default" ? "agent" : `profiles/${profileId}/agent`}/mcp.json`,
@@ -248,65 +270,66 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       invalidLines: 0,
       errors: 0,
     }),
-    listSessions: async () => ({
-      sessions: [
-        {
-          id: "demo-session-1",
-          profile: "default",
-          title: "重构 provider 配置加载",
-          model: "gpt-5",
-          provider: "openai",
-          messageCount: 12,
-          requestCount: 6,
-          tokens: { input: 18420, output: 5210 },
-          cost: 0.0842,
-          failures: 0,
-          stale: false,
-          fileSize: 48211,
-          startedAt: "2026-08-21T13:42:00Z",
-          lastActiveAt: "2026-08-21T14:08:00Z",
-        },
-      ],
+    listSessions: async (profileId) => ({
+      sessions: getSessions(profileId).map((entry) => ({ ...entry, tokens: { ...entry.tokens } })),
       nextCursor: undefined,
     }),
+    deleteSessions: async (profileId, sessionIds) => {
+      const sessions = getSessions(profileId);
+      const requested = new Set(sessionIds);
+      const deletedIds = sessions.filter((entry) => requested.has(entry.id)).map((entry) => entry.id);
+      const deleted = new Set(deletedIds);
+      sessionProfiles.set(profileId, sessions.filter((entry) => !deleted.has(entry.id)));
+      return { deletedIds, failures: [...requested].filter((id) => !deleted.has(id)).map((id) => ({ id, message: "Session was not found" })) };
+    },
     searchSessionFts: async () => [],
-    readSessionMessages: async (_profileId, _sessionId) => ({
-      messages: [
-        {
-          id: "m1",
-          role: "system",
-          text: "Session started with model openai/gpt-5",
-          timestamp: "2026-08-21T13:42:00Z",
+    readSessionMessages: async (profileId, sessionId) => {
+      if (!getSessions(profileId).some((entry) => entry.id === sessionId)) throw new Error("Session was not found");
+      return {
+        messages: [
+          {
+            id: "m1",
+            role: "system",
+            text: "Session started with model openai/gpt-5",
+            timestamp: "2026-08-21T13:42:00Z",
+          },
+        ],
+        hasMore: false,
+        nextCursor: undefined,
+      };
+    },
+    usageSummary: async (profileId = "default") => {
+      const sessions = getSessions(profileId);
+      const tokens: UsageTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0 };
+      for (const entry of sessions) for (const [key, count] of Object.entries(entry.tokens)) tokens[key] = (tokens[key] ?? 0) + count;
+      tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+      const requests = sessions.reduce((count, entry) => count + entry.requestCount, 0);
+      return {
+        report: {
+          totals: {
+            key: "total",
+            requests,
+            failures: sessions.reduce((count, entry) => count + entry.failures, 0),
+            tokens,
+            recordedCost: sessions.reduce((cost, entry) => cost + entry.cost, 0),
+            computedCost: 0,
+            pricedRequests: 0,
+            firstAt: sessions[0]?.startedAt,
+            lastAt: sessions[0]?.lastActiveAt,
+          },
+          byModel: [],
+          byProvider: [],
+          byDay: [],
+          byModelByDay: {},
+          byProviderByDay: {},
+          unpriced: [],
         },
-      ],
-      hasMore: false,
-      nextCursor: undefined,
-    }),
-    usageSummary: async () => ({
-      report: {
-        totals: {
-          key: "total",
-          requests: 100,
-          failures: 0,
-          tokens: { input: 100000, output: 20000, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 120000 },
-          recordedCost: 0.5,
-          computedCost: 0,
-          pricedRequests: 0,
-          firstAt: "2026-08-15T08:00:00Z",
-          lastAt: "2026-08-21T22:00:00Z",
-        },
-        byModel: [],
-        byProvider: [],
-        byDay: [],
-        byModelByDay: {},
-        byProviderByDay: {},
-        unpriced: [],
-      },
-      indexedEntries: 100,
-      invalidLines: 0,
-      pricedModels: 0,
-      overrides: {},
-    }),
+        indexedEntries: requests,
+        invalidLines: 0,
+        pricedModels: 0,
+        overrides: {},
+      };
+    },
     setUsagePrice: async () => ({}),
     listGatewayPools: async () => [],
     saveGatewayPool: async (pool) => pool,
