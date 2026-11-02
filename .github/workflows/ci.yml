@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, fork/maintenance]
 
 permissions:
   contents: read
@@ -49,10 +49,12 @@ jobs:
         run: pnpm build
 
       - name: Package Windows artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/fork/maintenance'
         shell: pwsh
         run: pnpm package:win
 
       - name: Verify packaged JSON CLI
+        if: github.event_name == 'push' && github.ref == 'refs/heads/fork/maintenance'
         shell: pwsh
         run: pnpm verify:package-cli
 
@@ -252,7 +254,7 @@ jobs:
     name: Package and smoke-test Linux artifacts
     runs-on: ubuntu-latest
     # Heavy; keep PRs fast — the verify-linux job already covers the build.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fork/maintenance'
     timeout-minutes: 30
     steps:
       - name: Check out source
