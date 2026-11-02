@@ -278,7 +278,7 @@ jobs:
             --notes-file "docs/releases/$TAG_NAME.md"
           # Attach the signed manifest (if it was produced) to the same release. It is served from
           # /releases/download/latest/ so the app's fixed URL always points at the newest manifest.
-          if [ -f latest.json ]; then
+          if [ -f latest.json ] && [ -f latest.json.sig ]; then
             gh release upload "$TAG_NAME" latest.json latest.json.sig --clobber
           fi
 
