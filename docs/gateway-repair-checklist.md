@@ -1,0 +1,152 @@
+# 网关功能修复清单
+
+审计日期：2026-11-03。
+用途：跨会话续接网关修复；每项完成后记录改动、实际验证结果，再勾选，不能仅凭编译或测试通过判定完成。
+
+## 续接上下文
+
+- 本次已创建并切换的分支：`fix/gateway-create-layout`。后续开始前重新确认当前分支与工作区状态。
+- 前序已修复：首次新建网关池后编辑器不可见；无池时左侧空栏；上游控件溢出、错位和窄窗口布局。
+- 前序修改涉及 `src/renderer/modules/gateway/gateway-module.tsx`、`src/renderer/styles/modules.css`、`CHANGELOG.md`；此前未提交、未推送。不要覆盖这些工作或其他用户改动。
+- 先前发现 `.codegraph/`、`sync/` 为未跟踪内容，不属于本次修复，不要顺手提交或删除。
+- 本清单记录前序审计，不代表后续代码未变化。文件行号均为审计时位置，修复时以符号及当前源码为准。
+- 本轮仅审计并创建清单，下面的未勾选项尚未修复。
+
+## 证据等级
+
+- **实测确认**：使用真实本地 HTTP 上游、隔离临时目录，或浏览器交互已观察到结果。
+- **代码确认**：完整调用链可见，尚未完成该行为的运行复现。
+- **静态风险**：需要先运行复现，再决定修复和验收细节。
+- 实际 HTTP 网关链路当前被 G01 阻断。直接调用 `forwardGatewayRequest` 成功，不等于 HTTP 网关端到端成功。
+
+## 第一组：阻断与 Profile 隔离（P1）
+
+### G01 正常 POST 被误判为客户端取消
+
+- [ ] 修复请求取消判定，覆盖正常上传、真实断连和响应阶段取消。
+- 证据：**实测确认**。正常 POST `/v1/chat/completions`、`/v1/responses` 都返回 499 `Client cancelled request`；本地上游没有收到这两条请求。相同上游通过直接转发调用返回 200。
+- 位置：`packages/core/src/gateway.ts`，`GatewayServer.handle`，约 429–450 行。
+- 原因：监听 `IncomingMessage` 的 `close`，把正常请求体读取完成也当作客户端取消。
+- 验收：真实 HTTP Chat、Responses 均到达上游并返回成功正文；模型被替换为上游模型；正常读完请求体不取消请求；真实客户端断开可终止上游。
+- 回归测试须验证状态、正文和上游确实收到请求，不能只断言响应头。
+
+### G02 Profile 切换保留旧草稿，保存可移动原池
+
+- [ ] 明确草稿所属 Profile，阻止旧草稿保存到新 Profile。
+- [ ] 为池的持久化标识建立 Profile 隔离，迁移现有 SQLite/JSON 数据，避免同名 ID 跨 Profile 覆盖。
+- 证据：**实测确认**。
+  - 在 Default 编辑草稿，切到 Work，页面标题已变为 Work，但仍显示 Default 草稿。
+  - SQLite、JSON 后端保存相同池 ID 到 Work 后，Default 的池列表变空。
+- 位置：`gateway-module.tsx` 的 Profile effect / `saveDraft`（约 73、100 行）；`electron/metadata-store.ts` 的表结构、`saveGatewayPool`、`listGatewayPools`（约 110、243–258 行）。
+- 原因：Profile 变化只刷新列表，未隔离草稿；保存强制使用当前 `profileId`；数据库以池 ID 为全局主键，JSON 同样按 ID 去重。
+- 验收：两个 Profile 可各自保存同名池且不互相覆盖；切换 Profile 后旧草稿不能写入新 Profile；迁移前数据保留；健康记录也不能跨 Profile 混合。两个持久化后端均需验证。
+
+### G03 运行中保存不会更新活动配置
+
+- [ ] 建立明确的保存/应用语义，避免“保存成功”但实际服务继续旧路由。
+- 证据：**代码确认**。`gateway:save` 仅调用 `metadata.saveGatewayPool`，未更新活动 `GatewayServer`。
+- 位置：`electron/main.ts` 约 480–483 行；`gateway-module.tsx` 的 `saveDraft`、启动/停止按钮。
+- 验收：运行中修改虚拟模型、上游、顺序或启用状态后，实际新请求与界面显示的应用状态一致；不再静默继续使用旧配置。端口更改与 G11 一起明确。
+
+### G04 复用服务时仍保留旧 Profile 的 resolver
+
+- [ ] 同步活动池、Profile、供应商解析器及状态归属，不能只替换池列表。
+- 证据：**代码确认**。`resolveGatewayForwarder(profileId)` 捕获该 Profile 的配置；已有实例时 `startGateway` 只调用 `gateway.setPools(pools)`，不替换旧 forwarder。
+- 位置：`electron/main.ts` 的 `resolveGatewayForwarder`、`startGateway`，约 593–635 行；`GatewayServer` 构造函数。
+- 影响：复用实例后可能仍使用旧 Profile 的供应商地址、请求头和凭据引用；界面当前 Profile 与全局运行状态归属不明确。
+- 验收：Default/Work 使用相同 provider ID、不同本地上游和测试凭据，切换运行目标后请求只到正确上游；状态明确标识活动 Profile；停止操作的作用对象明确；失败切换不留下错误的状态归属。
+
+## 第二组：转发与资源生命周期（P2）
+
+### G05 响应头之后取消与超时失效
+
+- [ ] 保持上游响应体生命周期内的取消与超时控制，并在下游断连时释放上游流。
+- 证据：**直接转发层实测确认**。真实 SSE 首帧后 abort，超过配置的 40ms，观察至 100ms，上游连接仍未关闭。
+- 位置：`gateway.ts` 的 `forwardGatewayRequest` finally（约 250–252 行）、`copyResponse`（约 278–294 行）。
+- 原因：fetch 返回响应头后就移除 abort 监听并清除 timer；下游关闭没有配套销毁上游源流。
+- 验收：正常 SSE 可持续读取至 DONE；客户端在首帧后取消能关闭上游；停滞流按明确的超时语义结束；已有响应字节后不切换上游、不重复响应、不产生未处理异常。
+
+### G06 压缩响应头与正文不匹配
+
+- [ ] 保证转发的 `Content-Encoding` 与实际正文编码一致。
+- 证据：**直接转发层实测确认**。gzip 上游经 Node fetch 返回的正文已解压，但头仍是 `gzip`；二次 gunzip 得到 `Z_DATA_ERROR`。
+- 位置：`gateway.ts` 的 `RELAYED_RESPONSE_HEADERS`、`copyResponse`（约 25–33、280–283 行）。
+- 验收：G01 修复后，通过真实 HTTP 网关请求 gzip 上游，客户端可正常读取 JSON；普通和流式响应不受影响。
+
+### G07 探测及故障切换时未释放丢弃的响应体
+
+- [ ] 先复现连接/响应体是否泄漏，再为被丢弃的响应建立明确的消费或取消路径。
+- 证据：**静态风险，尚未运行确认**。probe 只读状态；重试时直接丢弃上一次响应，均未显式消费或取消 body。
+- 位置：`gateway.ts` 的 `probeGatewayUpstream`（约 131–138 行）、`forwardGatewayRequest` 的重试分支（约 237–239 行）。
+- 复现建议：假上游立即返回 200 或 429 响应头，正文持续不结束；观察探测返回、故障切换后该连接是否释放。
+- 验收：探测及重试不会遗留无限响应体或活动连接；最后一个正常返回给客户端的响应仍可读取。
+
+## 第三组：管理流程闭环（P2）
+
+### G08 删除后新增上游产生重复 ID
+
+- [ ] 新增上游生成池内未使用的 ID，并在保存边界拒绝重复 ID。
+- 证据：**实测确认**。新增 1、2、3 → 删除 2 → 再新增，结果为 `upstream-1, upstream-3, upstream-3`；React 报 duplicate-key。后端校验实测接受重复 ID。
+- 位置：`gateway-module.tsx` 新增按钮（约 287 行）、上游 key；`gateway.ts` 的 `validateGatewayPool`。
+- 验收：新增/删除/重排后 ID 始终唯一；每条上游的测速、健康记录和统计保持独立；重复 ID 输入在保存时有明确错误。
+
+### G09 测速没有处理草稿与已保存配置的区别
+
+- [ ] 明确测速使用哪个版本，避免测速未保存的新池，或修改后仍悄悄测速旧配置。
+- 证据：**代码确认**。前端传池/上游 ID，主进程只从 metadata 查找已保存对象；新池会报 Unknown gateway pool，新上游会报 Unknown gateway upstream。
+- 位置：`gateway-module.tsx` 的 `testProbe`、`probeAll`；`electron/main.ts` 的 `gateway:probe`，约 491–522 行。
+- 验收：新建及编辑后的测速行为明确；新上游不因尚未保存而产生误导反馈；全量测速失败不会被简单吞掉并以成功样式误报；结果能对应实际测试的配置版本。
+
+### G10 重新进入页面无法恢复 Token，状态与 Profile 归属不清
+
+- [ ] 为当前运行实例提供可用、归属明确的 Token 获取/显示流程。
+- 证据：**UI 实测及代码确认**。启动后显示 Token，离开网关页面再回来消失；组件只在启动返回时设置 token，状态接口没有恢复能力。Profile 切换又可能保留旧 token。
+- 位置：`gateway-module.tsx` 的 token state、`refresh`、`start`；`global.d.ts` 的 `gatewayStatus`；`electron/main.ts` 的状态 IPC。
+- 验收：应用刷新或重新进入页面时可取得当前运行实例需要的 Token；切换 Profile 不误展示归属错误的运行状态/Token；不把 Token 写入日志或扩大公开接口权限。
+
+### G11 每池端口字段与单监听端口实现不一致
+
+- [ ] 明确端口是服务级还是池级，统一配置模型、UI、校验与运行行为。
+- 证据：**代码确认**。每个池都有 `port`，启动只取第一个启用池的端口；已有实例启动时直接返回原绑定端口。
+- 位置：`electron/main.ts` 的 `startGateway`（约 609–633 行）、`gateway.ts` 的 `GatewayServer.start`、网关池端口输入框。
+- 验收：多个池、不同端口、运行中改端口时，UI 和实际监听地址一致；端口冲突有明确反馈；不再静默忽略配置。
+- 设计边界：不要未经决定就增加多监听架构；先明确既有功能应采用的端口语义。
+
+### G12 缺少网关池删除和上游启停管理
+
+- [ ] 补齐池删除的界面与后端闭环，处理运行中删除及健康/凭据引用残留。
+- [ ] 提供单条上游 `enabled` 的编辑入口，或明确缩减该字段对用户的承诺。
+- 证据：**代码确认的功能缺口**。现有界面只能删除上游，不能删除池；上游有 `enabled` 字段但无启停控件。
+- 涉及：`gateway-module.tsx`、`global.d.ts`、`electron/preload.ts`、`electron/main.ts`、`metadata-store.ts`、浏览器 mock。
+- 验收：可安全删除不需要的池；最后一个池删除后回到空状态；禁用的上游不参与转发；实际路由同步遵守 G03；删除池不等于删除共享凭据。
+- 注意：此项是管理能力补全，不是前序布局修改引入的回归。
+
+## 已验证正常的基线（修复时应保留）
+
+- `/healthz` 与带正确 Token 的 `/v1/models` 返回 200。
+- 缺少 Token 返回 401，带浏览器 Origin 返回 403，非回环 Host 返回 421。
+- 直接转发层：503 切换下一上游，401 不重试，模型 ID 被替换，基础 SSE 数据和 DONE 可读。
+- SQLite、JSON 后端能在关闭/重新打开后保留网关池和健康记录。
+- 布局已在 1490、1100、900、760、600px 下观察，无上游控件横向溢出；新增、排序、删除上游可交互。
+
+## 验证要求与已知环境限制
+
+1. 优先完成 G01，再通过真实 HTTP 网关运行 Chat、Responses、SSE、认证及故障切换场景；不能只调用转发函数或 mock API。
+2. 手工验证隔离 HOME、USERPROFILE、OMP_SWITCH_DATA_DIR；仅使用本地假上游和测试凭据，不触碰真实模型调用或用户数据。
+3. Profile 与持久化问题同时覆盖 SQLite、JSON 后端，关闭存储后再清理 Windows 临时目录。
+4. 特别补强正常 POST、跨 Profile、运行中应用、取消、编码等消费者可见行为的回归测试。现有响应头测试未验证成功状态及上游到达，499 也可能通过其断言。
+5. 行为变更后按仓库要求运行聚焦测试、`pnpm typecheck`、`pnpm test`、`pnpm build`，并记录真实烟测结果。IPC 变更同步 core（适用时）、main、preload、类型契约和 browser mock。
+6. 前序类型检查与构建通过；前序全量测试 415 通过、5 跳过、2 失败。失败均为 `packages/core/src/prompt-library.test.ts` 创建符号链接遭 Windows `EPERM`，不要当作网关回归，也不要为通过检查而删除安全测试。
+7. 修复永久行为后更新现有文档/变更记录，移除自己创建的临时脚本，不改无关文件。
+
+## 建议执行顺序
+
+G01 → G02/G04 → G03/G11 → G05/G06/G07 → G08/G09/G10 → G12。
+
+每次续接先读本清单，选择一组明确验收的事项；有前置依赖的事项不要仅做表面 UI 绕过。完成后在下面追加记录并勾选对应任务。
+
+## 完成记录
+
+| 项目 | 改动文件/提交 | 实际验证 | 仍有限制 |
+| --- | --- | --- | --- |
+| 待填写 | — | — | — |

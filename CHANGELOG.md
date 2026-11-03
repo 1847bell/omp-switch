@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Creating the first gateway pool now opens its draft editor instead of leaving the empty state visible. Closing an unsaved first pool returns to the empty state.
+- Gateway drafts use the full editor width when no pools exist. Upstream fields adapt to the editor width, with grouped health/probe/delete controls that stay inside the panel on narrow windows.
+
 ## 1.0.2 - 2026-11-02
 
 ### Added

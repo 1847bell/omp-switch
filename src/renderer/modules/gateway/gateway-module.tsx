@@ -212,7 +212,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
           ) : null}
         </div>
       </div>
-      {pools.length === 0 ? (
+      {pools.length === 0 && !draft ? (
         <div className="module-empty gateway-empty-state">
           <span className="empty-glyph"><CircleAlert size={26} /></span>
           <strong>{t("gateway.empty")}</strong>
@@ -224,8 +224,8 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
           </div>
         </div>
       ) : (
-      <div className="gateway-layout">
-        <div className="module-list-panel">
+      <div className={`gateway-layout${pools.length === 0 ? " gateway-layout--editor-only" : ""}`}>
+        {pools.length > 0 ? <div className="module-list-panel">
           {pools.map((pool) => (
             <button key={pool.id} className={`module-list-row ${draft?.id === pool.id ? "active" : ""}`} onClick={() => setDraft(pool)}>
               <span className="module-row-main">
@@ -237,7 +237,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
               </span>
             </button>
           ))}
-        </div>
+        </div> : null}
         <div className="module-editor-panel gateway-editor">
           {draft ? (
             <>
@@ -307,6 +307,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
                           <ChevronDown size={13} />
                         </IconButton>
                       </div>
+                      <div className="upstream-fields">
                       <input name={`upstreams.${index}.id`} value={upstream.id} onChange={(event) => updateUpstream(index, { id: event.target.value })} aria-label={t("gateway.ariaUpstreamId")} />
                       <ModelPicker
                         providers={providers}
@@ -332,6 +333,8 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
                         placeholder={t("gateway.credentialId")}
                         aria-label={t("gateway.credentialId")}
                       />
+                      </div>
+                      <div className="upstream-actions">
                       <IconButton
                         className={probeResult?.ok ? "ok" : ""}
                         variant="subtle"
@@ -378,6 +381,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
                       >
                         <Trash2 size={14} />
                       </IconButton>
+                      </div>
                     </div>
                   );
                 })}
@@ -408,7 +412,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
                     <span>{t("gateway.upstreamStatus")}</span>
                   </div>
                   {status.upstreams.map((stat) => (
-                    <div className="upstream-row" key={`${stat.poolId}:${stat.upstreamId}`}>
+                    <div className="upstream-status-row" key={`${stat.poolId}:${stat.upstreamId}`}>
                       <span className="mono">{stat.upstreamId}</span>
                       <span className={`status-chip ${stat.consecutiveFailures > 0 ? "warn" : "ok"}`}>
                         {stat.lastStatus ?? "ERR"}
