@@ -5,6 +5,7 @@
 ### Fixed
 - Creating the first gateway pool now opens its draft editor instead of leaving the empty state visible. Closing an unsaved first pool returns to the empty state.
 - Gateway drafts use the full editor width when no pools exist. Upstream fields adapt to the editor width, with grouped health/probe/delete controls that stay inside the panel on narrow windows.
+- Gateway Chat/Responses requests no longer treat a completed upload as client cancellation. Actual disconnects cancel pending upstream requests and release relayed response streams.
 
 ## 1.0.2 - 2026-11-02
 

@@ -1,4 +1,5 @@
 import http from "node:http";
+import { once } from "node:events";
 import { describe, expect, it } from "vitest";
 import { evaluateUpstreamHealth, forwardGatewayRequest, GatewayServer, isLoopbackHostHeader, isRetryableGatewayStatus, probeGatewayUpstream, validateGatewayPool } from "./gateway";
 
@@ -13,6 +14,14 @@ const pool = {
     { id: "two", providerId: "two", modelId: "model-two", kind: "omp-auth-gateway" as const, enabled: true },
   ],
 };
+
+async function listenLoopback(server: http.Server): Promise<number> {
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Expected a loopback TCP address");
+  return address.port;
+}
 
 describe("gateway routing", () => {
   it("only retries transient status codes", () => {
@@ -123,6 +132,113 @@ describe("gateway routing", () => {
     expect(isLoopbackHostHeader(undefined)).toBe(false);
   });
 
+  it.each(["/v1/chat/completions", "/v1/responses"] as const)("forwards a completed HTTP request to %s", async (requestPath) => {
+    const received: Array<{ path: string | undefined; body: unknown; authorization: string | undefined }> = [];
+    const upstream = http.createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      received.push({ path: request.url, body: JSON.parse(Buffer.concat(chunks).toString("utf8")), authorization: request.headers.authorization });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ id: "local-response", output: "hello" }));
+    });
+    const upstreamPort = await listenLoopback(upstream);
+    const server = new GatewayServer({
+      resolve: async () => ({ baseUrl: `http://127.0.0.1:${upstreamPort}/v1`, apiKey: "local-key" }),
+    }, [pool], { token: "test-token" });
+    const port = await server.start(0);
+    const input = requestPath === "/v1/responses" ? { input: "hello" } : { messages: [{ role: "user", content: "hello" }] };
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${requestPath}`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model: pool.virtualModel, ...input }),
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ id: "local-response", output: "hello" });
+      expect(received).toEqual([{ path: requestPath, body: { model: "model-one", ...input }, authorization: "Bearer local-key" }]);
+    } finally {
+      await server.stop();
+      upstream.closeAllConnections();
+      await once(upstream.close(), "close");
+    }
+  });
+
+  it("waits for a chunked upload to finish before forwarding", async () => {
+    const received: unknown[] = [];
+    const upstream = http.createServer(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      response.end("uploaded");
+    });
+    const upstreamPort = await listenLoopback(upstream);
+    const server = new GatewayServer({ resolve: async () => ({ baseUrl: `http://127.0.0.1:${upstreamPort}` }) }, [pool], { token: "test-token" });
+    const port = await server.start(0);
+    try {
+      const request = http.request({ hostname: "127.0.0.1", port, path: "/v1/chat/completions", method: "POST", headers: { authorization: "Bearer test-token", "content-type": "application/json" } });
+      const responseReceived = once(request, "response");
+      request.write(`{"model":"${pool.virtualModel}",`);
+      setImmediate(() => request.end('"messages":[{"role":"user","content":"chunked"}]}'));
+      const [response] = await responseReceived as [http.IncomingMessage];
+      let body = "";
+      response.setEncoding("utf8");
+      for await (const chunk of response) body += chunk;
+      expect(response.statusCode).toBe(200);
+      expect(body).toBe("uploaded");
+      expect(received).toEqual([{ model: "model-one", messages: [{ role: "user", content: "chunked" }] }]);
+    } finally {
+      await server.stop();
+      upstream.closeAllConnections();
+      await once(upstream.close(), "close");
+    }
+  });
+
+  it.each([false, true])("closes the upstream when the client disconnects (streaming: %s)", async (streaming) => {
+    const upstream = http.createServer((request, response) => {
+      request.resume();
+      if (streaming) {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write("data: hello\n\n");
+      }
+    });
+    const upstreamPort = await listenLoopback(upstream);
+    const server = new GatewayServer({ resolve: async () => ({ baseUrl: `http://127.0.0.1:${upstreamPort}` }) }, [pool], { token: "test-token" });
+    const port = await server.start(0);
+    const controller = new AbortController();
+    const upstreamRequested = once(upstream, "request");
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const client = fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model: pool.virtualModel, stream: streaming }),
+        signal: controller.signal,
+      });
+      const clientResult = client.catch((error: unknown) => error);
+      const [, upstreamResponse] = await upstreamRequested as [http.IncomingMessage, http.ServerResponse];
+      const upstreamClosed = once(upstreamResponse, "close");
+      if (streaming) {
+        const response = await client;
+        expect(response.status).toBe(200);
+        reader = response.body!.getReader();
+        const first = await reader.read();
+        expect(new TextDecoder().decode(first.value)).toBe("data: hello\n\n");
+      }
+      controller.abort();
+      if (reader) await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" });
+      else expect(await clientResult).toMatchObject({ name: "AbortError" });
+      await upstreamClosed;
+      expect(upstreamResponse.destroyed).toBe(true);
+      expect(server.getStats().some((stat) => stat.upstreamId === "two")).toBe(false);
+    } finally {
+      controller.abort();
+      reader?.releaseLock();
+      upstream.closeAllConnections();
+      await server.stop();
+      await once(upstream.close(), "close");
+    }
+  });
+
   it("relays only safe response headers", async () => {
     const server = new GatewayServer({
       resolve: async () => ({ baseUrl: "https://one.example/v1" }),
@@ -138,6 +254,8 @@ describe("gateway routing", () => {
         headers: { authorization: "Bearer test-token", "content-type": "application/json" },
         body: JSON.stringify({ model: "omp-switch/fast" }),
       });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({});
       expect(response.headers.get("set-cookie")).toBeNull();
       expect(response.headers.get("content-type")).toContain("application/json");
     } finally {

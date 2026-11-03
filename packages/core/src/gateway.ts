@@ -286,12 +286,16 @@ function copyResponse(upstream: Response, response: ServerResponse): void {
     return;
   }
   const stream = Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream);
+  const onClose = () => { stream.destroy(); };
+  response.once("close", onClose);
+  stream.once("close", () => response.off("close", onClose));
   stream.on("error", () => {
     if (!response.writableEnded) {
       response.destroy();
     }
   });
-  stream.pipe(response);
+  if (response.destroyed) stream.destroy();
+  else stream.pipe(response);
 }
 
 export interface GatewayServerOptions {
@@ -427,8 +431,9 @@ export class GatewayServer {
         return;
       }
       const clientAbortController = new AbortController();
-      request.on("close", () => {
-        if (!response.writableEnded) {
+      // IncomingMessage closes after a complete upload too; only an unfinished response means the client left.
+      response.once("close", () => {
+        if (!response.writableFinished) {
           clientAbortController.abort();
         }
       });
