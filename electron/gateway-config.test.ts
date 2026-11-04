@@ -22,6 +22,15 @@ async function listen(server: http.Server): Promise<number> {
   return address.port;
 }
 
+async function unusedPort(): Promise<number> {
+  const reservation = http.createServer();
+  const port = await listen(reservation);
+  const released = once(reservation, "close");
+  reservation.close();
+  await released;
+  return port;
+}
+
 async function fixture(backend: "auto" | "json") {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-gateway-config-"));
   const store = new MetadataStore(root, { backend });
@@ -39,11 +48,7 @@ async function fixture(backend: "auto" | "json") {
   });
   const upstreamPort = await listen(upstream);
   cleanups.push(async () => { const closed = once(upstream, "close"); upstream.close(); await closed; });
-  const reservation = http.createServer();
-  const port = await listen(reservation);
-  const released = once(reservation, "close");
-  reservation.close();
-  await released;
+  const port = await unusedPort();
   const baseUrl = `http://127.0.0.1:${upstreamPort}`;
   const controls = {
     tokenError: false, resolverError: false, revision: "original",
@@ -67,13 +72,15 @@ async function fixture(backend: "auto" | "json") {
   });
   cleanups.push(() => config.stop(config.status().profileId ?? "alpha"));
   const pool: GatewayPool = {
-    id: "shared", profile: "alpha", virtualModel: "virtual/original", port, enabled: true,
+    id: "shared", profile: "alpha", virtualModel: "virtual/original", enabled: true,
     upstreams: [
       { id: "one", providerId: "first", modelId: "model-one", kind: "secret", credentialId: "cred", enabled: true },
       { id: "two", providerId: "second", modelId: "model-two", kind: "secret", credentialId: "cred", enabled: true },
     ],
   };
   await config.save(store, pool);
+  await config.setPort(store, "alpha", port);
+  await config.setPort(store, "beta", port);
   const start = () => config.start(store, "alpha");
   const stop = () => config.stop("alpha");
   const request = (model: string) => {
@@ -86,7 +93,7 @@ async function fixture(backend: "auto" | "json") {
     const response = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: "Bearer test-token" } });
     return response.json() as Promise<{ data: Array<{ id: string }> }>;
   };
-  return { root, store, config, pool, start, stop, request, models, controls };
+  return { root, store, config, pool, port, start, stop, request, models, controls };
 }
 
 describe.each(["auto", "json"] as const)("production gateway save boundary (%s)", (backend) => {
@@ -125,7 +132,7 @@ describe.each(["auto", "json"] as const)("production gateway save boundary (%s)"
     await config.save(store, { ...pool, virtualModel: "virtual/stopped" });
     expect(config.status().running).toBe(false);
     await start();
-    await config.save(store, { ...pool, profile: "beta", virtualModel: "virtual/other", port: 46832 });
+    await config.save(store, { ...pool, profile: "beta", virtualModel: "virtual/other" });
     expect((await request("virtual/stopped")).status).toBe(200);
     expect((await request("virtual/other")).status).toBe(404);
     expect(store.listGatewayPools("beta")[0].virtualModel).toBe("virtual/other");
@@ -136,13 +143,13 @@ describe.each(["auto", "json"] as const)("production gateway save boundary (%s)"
   });
 
   it("rejects an active port edit before persistence and keeps current routes", async () => {
-    const { store, config, pool, start, request } = await fixture(backend);
+    const { store, config, pool, port, start, request } = await fixture(backend);
     await start();
-    const port = pool.port === 65535 ? 65534 : pool.port + 1;
-    await expect(config.save(store, { ...pool, port, virtualModel: "virtual/rejected" })).rejects.toThrow(/stop.*port/i);
-    expect(store.listGatewayPools("alpha")[0]).toEqual(pool);
+    const nextPort = port === 65535 ? 65534 : port + 1;
+    await expect(config.setPort(store, "alpha", nextPort)).rejects.toThrow(/stop.*port/i);
+    expect(store.getGatewayListenerSettings("alpha").port).toBe(port);
+    expect(config.status().port).toBe(port);
     expect((await request(pool.virtualModel)).status).toBe(200);
-    expect((await request("virtual/rejected")).status).toBe(404);
     await config.save(store, { ...pool, virtualModel: "virtual/accepted" });
     expect((await request("virtual/accepted")).status).toBe(200);
   });
@@ -197,15 +204,15 @@ describe.each(["auto", "json"] as const)("gateway lifecycle ownership (%s)", (ba
   });
 
   it("switches shared IDs both ways and reloads same-profile resolver, key and headers", async () => {
-    const { store, config, pool, start, request, controls } = await fixture(backend);
+    const { store, config, pool, port, start, request, controls } = await fixture(backend);
     await config.save(store, { ...pool, profile: "beta" });
     await start();
     for (const profile of ["alpha", "beta", "alpha"]) {
-      expect(await config.start(store, profile)).toEqual({ running: true, profileId: profile, port: pool.port, token: "test-token" });
+      expect(await config.start(store, profile)).toEqual({ running: true, profileId: profile, port, token: "test-token" });
       expect(await (await request(pool.virtualModel)).json()).toMatchObject({
         route: `/${profile}/original/first/v1/chat/completions`, authorization: `Bearer ${profile}-original-key`, owner: `${profile}-original`,
       });
-      expect(config.status()).toMatchObject({ running: true, profileId: profile, port: pool.port });
+      expect(config.status()).toMatchObject({ running: true, profileId: profile, port });
     }
     controls.revision = "reloaded";
     await start();
@@ -219,8 +226,8 @@ describe.each(["auto", "json"] as const)("gateway lifecycle ownership (%s)", (ba
     expect(config.status()).toEqual({ running: false, profileId: null, port: null, upstreams: [] });
   });
 
-  it("preserves alpha routes and ownership on resolver, token, preference and port failures", async () => {
-    const { store, config, pool, start, request, controls } = await fixture(backend);
+  it("preserves alpha routes and ownership on resolver, token and port failures", async () => {
+    const { store, config, pool, port, start, request, controls } = await fixture(backend);
     await config.save(store, { ...pool, profile: "beta" });
     await start();
     await expect(config.start(store, "missing")).rejects.toThrow(/no enabled gateway pools/i);
@@ -230,31 +237,24 @@ describe.each(["auto", "json"] as const)("gateway lifecycle ownership (%s)", (ba
     controls.tokenError = true;
     await expect(config.start(store, "beta")).rejects.toThrow("token failed");
     controls.tokenError = false;
-    const preference = vi.spyOn(store, "setPreference").mockRejectedValueOnce(new Error("preference failed"));
-    await expect(config.start(store, "beta")).rejects.toThrow("preference failed");
-    preference.mockRestore();
-    await config.save(store, { ...pool, profile: "beta", port: pool.port === 65535 ? 65534 : pool.port + 1 });
+    await config.setPort(store, "beta", port === 65535 ? 65534 : port + 1);
     await expect(config.start(store, "beta")).rejects.toThrow(/stop.*port/i);
-    expect(config.status()).toMatchObject({ running: true, profileId: "alpha", port: pool.port });
+    expect(config.status()).toMatchObject({ running: true, profileId: "alpha", port });
     expect(await (await request(pool.virtualModel)).json()).toMatchObject({ route: "/alpha/original/first/v1/chat/completions", owner: "alpha-original" });
   });
 
-  it("does not claim ownership after initial bind or preference failure", async () => {
-    const { store, config, pool, start } = await fixture(backend);
+  it("does not claim ownership after an initial bind failure", async () => {
+    const { store, config, port, start } = await fixture(backend);
     const occupied = http.createServer();
     const listening = once(occupied, "listening");
-    occupied.listen(pool.port, "127.0.0.1");
+    occupied.listen(port, "127.0.0.1");
     await listening;
     try {
-      await expect(start()).rejects.toThrow();
+      await expect(start()).rejects.toThrow(new RegExp(`port ${port}.*already in use`, "i"));
       expect(config.status()).toEqual({ running: false, profileId: null, port: null, upstreams: [] });
     } finally {
       const closed = once(occupied, "close"); occupied.close(); await closed;
     }
-    const preference = vi.spyOn(store, "setPreference").mockRejectedValueOnce(new Error("preference failed"));
-    await expect(start()).rejects.toThrow("preference failed");
-    preference.mockRestore();
-    expect(config.status()).toEqual({ running: false, profileId: null, port: null, upstreams: [] });
     await start();
     expect(config.status().profileId).toBe("alpha");
   });
@@ -288,26 +288,26 @@ describe.each(["auto", "json"] as const)("gateway lifecycle ownership (%s)", (ba
 
 describe.each(["auto", "json"] as const)("gateway connection recovery (%s)", (backend) => {
   it("recovers the accepted runtime token only for its owner without reading a changed token source", async () => {
-    const { config, pool, start, controls } = await fixture(backend);
+    const { config, pool, port, start, controls } = await fixture(backend);
     await start();
     controls.token = "unapplied-token";
     controls.tokenError = true;
     controls.resolverError = true;
     const connection = config.status("alpha");
-    const response = await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${connection.token}` } });
+    const response = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${connection.token}` } });
     expect(response.status).toBe(200);
     const models = await response.json();
     expect(models).toMatchObject({ data: [{ id: pool.virtualModel }] });
     expect(config.status("beta").token).toBeUndefined();
     expect(config.status().token).toBeUndefined();
-    const health = await fetch(`http://127.0.0.1:${pool.port}/healthz`);
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`);
     expect(health.status).toBe(200);
     expect(await health.text()).not.toContain(connection.token);
     expect(JSON.stringify(models)).not.toContain(connection.token);
   });
 
   it("keeps the old accepted token on a failed switch and changes it only after a successful owner transition", async () => {
-    const { store, config, pool, start, controls } = await fixture(backend);
+    const { store, config, pool, port, start, controls } = await fixture(backend);
     await config.save(store, { ...pool, profile: "beta" });
     await start();
     const original = config.status("alpha").token;
@@ -316,18 +316,90 @@ describe.each(["auto", "json"] as const)("gateway connection recovery (%s)", (ba
     await expect(config.start(store, "beta")).rejects.toThrow("resolver failed");
     const retained = config.status("alpha");
     expect(retained).toMatchObject({ running: true, profileId: "alpha" });
-    expect((await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${retained.token}` } })).status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${retained.token}` } })).status).toBe(200);
     expect(config.status("beta").token).toBeUndefined();
     controls.resolverError = false;
     await config.start(store, "beta");
     const switched = config.status("beta");
     expect(switched).toMatchObject({ running: true, profileId: "beta" });
     expect(config.status("alpha").token).toBeUndefined();
-    expect((await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${switched.token}` } })).status).toBe(200);
-    expect((await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${original}` } })).status).toBe(401);
+    expect((await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${switched.token}` } })).status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { authorization: `Bearer ${original}` } })).status).toBe(401);
     await config.stop("beta");
     const stopped = config.status("beta");
     expect(stopped.running).toBe(false);
     expect(stopped.token).toBeUndefined();
+  });
+});
+
+describe.each(["auto", "json"] as const)("profile listener settings (%s)", (backend) => {
+  it("serves multiple pools on the configured listener and moves both only after stop", async () => {
+    const { store, config, pool, port, start, stop, request, models } = await fixture(backend);
+    const second = { ...pool, id: "second", virtualModel: "virtual/second", upstreams: [pool.upstreams[1]] };
+    await config.save(store, second);
+    expect((await start()).port).toBe(port);
+    expect((await models()).data.map((entry) => entry.id).sort()).toEqual([pool.virtualModel, second.virtualModel].sort());
+    expect(await (await request(pool.virtualModel)).json()).toMatchObject({ model: "model-one" });
+    expect(await (await request(second.virtualModel)).json()).toMatchObject({ model: "model-two" });
+    await stop();
+    const nextPort = await unusedPort();
+    await config.setPort(store, "alpha", nextPort);
+    expect((await start()).port).toBe(nextPort);
+    for (const [model, expected] of [[pool.virtualModel, "model-one"], [second.virtualModel, "model-two"]]) {
+      const response = await fetch(`http://127.0.0.1:${nextPort}/v1/chat/completions`, {
+        method: "POST", headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "hello" }] }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ model: expected });
+    }
+    await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
+  });
+
+  it("requires explicit resolution of conflicting legacy ports before binding", async () => {
+    const { store, config, pool, port, start, request } = await fixture(backend);
+    await store.setPreference("gateway.listener.alpha", { port: null, conflictingPorts: [port, port === 65535 ? 65534 : port + 1] });
+    await expect(start()).rejects.toThrow(/choose and save.*listener port/i);
+    expect(config.status().running).toBe(false);
+    await config.setPort(store, "alpha", port);
+    expect((await start()).port).toBe(port);
+    expect((await request(pool.virtualModel)).status).toBe(200);
+  });
+
+  it("retains the saved listener on a failed settings write and uses the next successful value", async () => {
+    const { store, config, port, start } = await fixture(backend);
+    const nextPort = await unusedPort();
+    const write = vi.spyOn(store, "setGatewayListenerPort").mockRejectedValueOnce(new Error("port persistence failed"));
+    await expect(config.setPort(store, "alpha", nextPort)).rejects.toThrow("port persistence failed");
+    expect(store.getGatewayListenerSettings("alpha")).toEqual({ port, conflictingPorts: [] });
+    expect(config.status().running).toBe(false);
+    write.mockRestore();
+    await config.setPort(store, "alpha", nextPort);
+    expect((await start()).port).toBe(nextPort);
+    const health = await fetch(`http://127.0.0.1:${nextPort}/healthz`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ ok: true, pools: 1 });
+  });
+
+  it("serializes a port change with start so the listener uses the committed setting", async () => {
+    const { store, config, start } = await fixture(backend);
+    const nextPort = await unusedPort();
+    const [settings, started] = await Promise.all([config.setPort(store, "alpha", nextPort), start()]);
+    expect(settings.port).toBe(nextPort);
+    expect(started.port).toBe(nextPort);
+    const health = await fetch(`http://127.0.0.1:${nextPort}/healthz`);
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({ ok: true, pools: 1 });
+  });
+
+  it("rejects obsolete per-pool ports rather than silently accepting ignored settings", async () => {
+    const { store, config, pool, port, start, request } = await fixture(backend);
+    await start();
+    const obsolete = { ...pool, port: port === 65535 ? 65534 : port + 1, virtualModel: "virtual/obsolete" };
+    await expect(config.save(store, obsolete)).rejects.toThrow(/port.*profile|profile.*port/i);
+    expect(store.listGatewayPools("alpha")).toEqual([pool]);
+    expect(config.status().port).toBe(port);
+    expect((await request(pool.virtualModel)).status).toBe(200);
+    expect((await request(obsolete.virtualModel)).status).toBe(404);
   });
 });

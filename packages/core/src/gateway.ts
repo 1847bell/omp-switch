@@ -69,10 +69,14 @@ function bearerFrom(header: string | undefined): string | undefined {
   return match ? match[1].trim() : undefined;
 }
 
+export function validateGatewayPort(port: number): void {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Gateway port is invalid");
+}
+
 export function validateGatewayPool(pool: GatewayPool): void {
 
   if (!SAFE_ID.test(pool.id) || !SAFE_ID.test(pool.profile)) throw new Error("Gateway pool contains an invalid identifier");
-  if (!Number.isInteger(pool.port) || pool.port < 1024 || pool.port > 65535) throw new Error("Gateway port is invalid");
+  if (Object.hasOwn(pool, "port")) throw new Error("Gateway listener port is configured per Profile, not per pool");
   if (!/^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$/.test(pool.virtualModel)) throw new Error("Gateway virtual model is invalid");
   if (!Array.isArray(pool.upstreams) || pool.upstreams.length === 0) throw new Error("Gateway pool needs at least one upstream");
   const upstreamIds = new Set<string>();

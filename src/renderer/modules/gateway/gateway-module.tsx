@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type {
   GatewayPool,
+  GatewayListenerSettings,
   GatewayUpstream,
   GatewayUpstreamHealth,
   OmpProvider,
@@ -45,7 +46,7 @@ function makeGatewayPool(profileId: string, providers: Array<[string, OmpProvide
   const providerId = first?.[0] ?? "";
   const modelId = model?.id ?? "";
   const upstream = makeGatewayUpstream(providerId, modelId);
-  return { id: `pool-${Date.now().toString(36)}`, profile: profileId, virtualModel: "omp-switch/default", port: 46831, enabled: true, upstreams: [upstream] };
+  return { id: `pool-${Date.now().toString(36)}`, profile: profileId, virtualModel: "omp-switch/default", enabled: true, upstreams: [upstream] };
 }
 
 export function GatewayModule(props: GatewayProps): ReactElement {
@@ -56,6 +57,8 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const { t } = useTranslation();
   const [pools, setPools] = useState<GatewayPool[]>([]);
   const [draft, setDraft] = useState<GatewayPool | null>(null);
+  const [listenerSettings, setListenerSettings] = useState<GatewayListenerSettings | null>(null);
+  const [portInput, setPortInput] = useState("");
   const [upstreamRowKeys] = useState(() => new WeakMap<GatewayUpstream, string>());
   const [status, setStatus] = useState<Awaited<ReturnType<AppApi["gatewayStatus"]>>>({ running: false, profileId: null, port: null, upstreams: [] });
   const token = status.running && status.profileId === profileId ? status.token : undefined;
@@ -68,6 +71,10 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const draftVersion = useMemo(() => JSON.stringify(draft), [draft]);
   const savedVersion = useMemo(() => JSON.stringify(savedPool), [savedPool]);
   const canProbe = Boolean(savedPool && draftVersion === savedVersion);
+  const port = Number(portInput);
+  const validPort = portInput.trim() !== "" && Number.isInteger(port) && port >= 1024 && port <= 65535;
+  const portSaved = listenerSettings?.port !== null && listenerSettings?.port !== undefined && validPort && port === listenerSettings.port;
+  const portLocked = status.running && status.profileId === profileId;
 
   function clearToken(): void {
     setStatus((current) => current.token === undefined ? current : { ...current, token: undefined });
@@ -84,6 +91,9 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     setLoading(true);
     try {
       setPools(await api.listGatewayPools(profileId));
+      const settings = await api.gatewayListenerSettings(profileId);
+      setListenerSettings(settings);
+      setPortInput(settings.port === null ? "" : String(settings.port));
       await refreshStatus();
       const health = await api.gatewayHealth(profileId);
       setHealthMap(health);
@@ -95,6 +105,21 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   useEffect(() => { void refresh(); }, [profileId]);
+
+  async function savePort(): Promise<void> {
+    if (readOnly || portLocked || !validPort) return;
+    setLoading(true);
+    try {
+      const settings = await api.setGatewayPort(profileId, port);
+      setListenerSettings(settings);
+      setPortInput(settings.port === null ? "" : String(settings.port));
+      onNotice({ tone: "success", text: t("gateway.portSaved", { profile: profileId }) });
+    } catch (error) {
+      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setLoading(false);
+    }
+  }
 
   function updateDraft<K extends keyof GatewayPool>(key: K, value: GatewayPool[K]): void {
     setDraft((current) => current ? { ...current, [key]: value } : current);
@@ -159,6 +184,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
 
   async function start(): Promise<void> {
     if (readOnly) return onNotice({ tone: "error", text: t("gateway.readonly") });
+    if (!portSaved) return onNotice({ tone: "info", text: t("gateway.portSaveFirst") });
     clearToken();
     const saved = await saveDraft();
     if (!saved) {
@@ -295,6 +321,22 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
           ) : null}
         </div>
       </div>
+      <div className="gateway-connection">
+        <label className="module-field">
+          <span>{t("gateway.profilePort", { profile: profileId })}</span>
+          <input name="listenerPort" inputMode="numeric" value={portInput} onChange={(event) => setPortInput(event.target.value)} disabled={loading || readOnly || portLocked || listenerSettings === null} aria-describedby="gateway-port-hint" aria-invalid={portInput !== "" && !validPort} />
+        </label>
+        <button className="secondary-button" onClick={() => void savePort()} disabled={loading || readOnly || portLocked || !validPort || portSaved || listenerSettings === null}>
+          <Save size={15} />{t("gateway.savePort")}
+        </button>
+        <p id="gateway-port-hint" className="muted-line" aria-live="polite">
+          {t("gateway.portHint")}
+          {listenerSettings?.port === null ? ` ${t("gateway.portUnresolved", { ports: listenerSettings.conflictingPorts.join(", ") || t("gateway.portUnknown") })}` : ""}
+          {portInput !== "" && !validPort ? ` ${t("gateway.portInvalid")}` : ""}
+          {!portSaved ? ` ${t("gateway.portSaveFirst")}` : ""}
+          {portLocked ? ` ${t("gateway.portLocked")}` : ""}
+        </p>
+      </div>
       {token ? (
         <label className="module-field">
           <span>{t("gateway.bearerToken", { profile: status.profileId })}</span>
@@ -319,7 +361,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
             <button key={pool.id} className={`module-list-row ${draft?.id === pool.id ? "active" : ""}`} onClick={() => openDraft(pool)}>
               <span className="module-row-main">
                 <strong>{pool.virtualModel}</strong>
-                <small>{pool.id} · {t("gateway.upstreamCount", { count: pool.upstreams.length })} · {pool.port}</small>
+                <small>{pool.id} · {t("gateway.upstreamCount", { count: pool.upstreams.length })}</small>
               </span>
               <span className={`status-chip ${pool.enabled ? "ok" : "neutral"}`}>
                 {pool.enabled ? t("gateway.enabled") : t("gateway.disabled")}
@@ -339,16 +381,10 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                   <button className="secondary-button" onClick={() => setDraft(null)}>{t("common.close")}</button>
                 </div>
               </div>
-              <div className="form-two">
-                <label className="module-field">
-                  <span>{t("gateway.fieldId")}</span>
-                  <input name="poolId" value={draft.id} onChange={(event) => updateDraft("id", event.target.value)} disabled={Boolean(pools.find((pool) => pool.id === draft.id))} />
-                </label>
-                <label className="module-field">
-                  <span>{t("gateway.fieldPort")}</span>
-                  <input name="poolPort" inputMode="numeric" value={draft.port} onChange={(event) => updateDraft("port", Number(event.target.value) || 0)} />
-                </label>
-              </div>
+              <label className="module-field">
+                <span>{t("gateway.fieldId")}</span>
+                <input name="poolId" value={draft.id} onChange={(event) => updateDraft("id", event.target.value)} disabled={Boolean(pools.find((pool) => pool.id === draft.id))} />
+              </label>
               <label className="module-field">
                 <span>{t("gateway.fieldVirtualModel")}</span>
                 <input name="virtualModel" value={draft.virtualModel} onChange={(event) => updateDraft("virtualModel", event.target.value)} placeholder="omp-switch/default" />
@@ -485,7 +521,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                 <button className="primary-button" onClick={() => void saveDraft()} disabled={loading || readOnly || isProbing}>
                   <Save size={15} />{t("common.save")}
                 </button>
-                <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly || isProbing}>
+                <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly || isProbing || !portSaved}>
                   <Play size={14} />{t(status.running && status.profileId !== profileId ? "gateway.switchProfile" : "gateway.start", { profile: profileId })}
                 </button>
               </div>

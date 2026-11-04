@@ -1,14 +1,13 @@
 import http from "node:http";
 import { EventEmitter, once } from "node:events";
 import { describe, expect, it } from "vitest";
-import { evaluateUpstreamHealth, forwardGatewayRequest, GatewayServer, isLoopbackHostHeader, isRetryableGatewayStatus, probeGatewayUpstream, validateGatewayPool } from "./gateway";
+import { evaluateUpstreamHealth, forwardGatewayRequest, GatewayServer, isLoopbackHostHeader, isRetryableGatewayStatus, probeGatewayUpstream, validateGatewayPool, validateGatewayPort } from "./gateway";
 import type { GatewayUpstream } from "./domain";
 
 const pool = {
   id: "fast",
   profile: "default",
   virtualModel: "omp-switch/fast",
-  port: 46831,
   enabled: true,
   upstreams: [
     { id: "one", providerId: "one", modelId: "model-one", kind: "secret" as const, credentialId: "one", enabled: true },
@@ -25,6 +24,10 @@ async function listenLoopback(server: http.Server): Promise<number> {
 }
 
 describe("gateway routing", () => {
+  it.each([0, 1023, 65536, 46831.5, NaN, Infinity])("rejects invalid listener port %s", (port) => {
+    expect(() => validateGatewayPort(port)).toThrow("Gateway port is invalid");
+  });
+
   it("only retries transient status codes", () => {
     expect(isRetryableGatewayStatus(429)).toBe(true);
     expect(isRetryableGatewayStatus(503)).toBe(true);

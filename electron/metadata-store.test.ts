@@ -29,7 +29,6 @@ function pool(id: string, profile = "default"): GatewayPool {
     id,
     profile,
     virtualModel: "omp-switch/" + id,
-    port: 46831,
     enabled: true,
     upstreams: [{ id: "one", providerId: "openai", modelId: "gpt-5", kind: "secret", credentialId: "cred", enabled: true }],
   };
@@ -74,6 +73,115 @@ function sessionCache(id: string, profile = "default", hour = 0): SessionFileCac
 }
 
 describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend) => {
+  it("defaults and persists listener settings independently per Profile", async () => {
+    const { root, store } = await makeStore(backend);
+    expect(store.getGatewayListenerSettings("default")).toEqual({ port: 46831, conflictingPorts: [] });
+    await store.setGatewayListenerPort("default", 47001);
+    await store.setGatewayListenerPort("work", 47002);
+    for (const port of [0, 1023, 65536, 1.5, NaN, Infinity]) {
+      await expect(store.setGatewayListenerPort("default", port)).rejects.toThrow("Gateway port is invalid");
+    }
+    const settings = store.getGatewayListenerSettings("default");
+    settings.conflictingPorts.push(9999);
+    expect(store.getGatewayListenerSettings("default")).toEqual({ port: 47001, conflictingPorts: [] });
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.getGatewayListenerSettings("default")).toEqual({ port: 47001, conflictingPorts: [] });
+    expect(reopened.getGatewayListenerSettings("work")).toEqual({ port: 47002, conflictingPorts: [] });
+    expect(reopened.getPreference("gateway.listener.default")).toEqual({ port: 47001, conflictingPorts: [] });
+  });
+
+  it("migrates legacy listener ports across all Profiles and stays idempotent on reopening", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.setProviderLabel("openai", "Preserved");
+    await store.setPreference("unrelated", { retained: true });
+    await store.addSnapshot({ id: "preserved", profile: "same", createdAt: "2026-11-04T00:00:00Z" });
+    const legacyPools = [
+      { ...pool("one", "same"), port: 47011, extra: "retained" },
+      { ...pool("two", "same"), port: 47011, enabled: false },
+      { ...pool("one", "conflict"), port: 47022 },
+      { ...pool("two", "conflict"), port: 47021, enabled: false },
+      { ...pool("one", "invalid"), port: 80 },
+      { ...pool("two", "invalid"), port: 47031 },
+      { ...pool("one", "string"), port: "47041" },
+      { ...pool("one", "explicit"), port: 47051 },
+      { ...pool("two", "explicit"), port: 47052 },
+      { ...pool("one", "unresolved"), port: 47061 },
+      pool("one", "new"),
+    ];
+    const preferences = {
+      "gateway.port": 49999,
+      "gateway.listener.explicit": { port: 48001, conflictingPorts: [] },
+      "gateway.listener.unresolved": { port: null, conflictingPorts: [48002, 48003] },
+    };
+    store.close();
+    if (backend === "json") {
+      const file = path.join(root, "metadata.sqlite.json");
+      const state = JSON.parse(await fs.readFile(file, "utf8"));
+      state.gatewayPools = legacyPools;
+      Object.assign(state.preferences, preferences);
+      await fs.writeFile(file, JSON.stringify(state), "utf8");
+    } else {
+      const database = new SqliteDatabaseSync(path.join(root, "metadata.sqlite"));
+      try {
+        const insertPool = database.prepare("INSERT INTO gateway_pools VALUES (?, ?, ?)");
+        for (const item of legacyPools) insertPool.run(item.id, item.profile, JSON.stringify(item));
+        const insertPreference = database.prepare("INSERT INTO preferences VALUES (?, ?)");
+        for (const [key, value] of Object.entries(preferences)) insertPreference.run(key, JSON.stringify(value));
+      } finally {
+        database.close();
+      }
+    }
+    const cleanPools = legacyPools.map((item) => {
+      const clean = { ...item } as GatewayPool & { port?: unknown };
+      delete clean.port;
+      return clean;
+    });
+    for (let round = 0; round < 2; round++) {
+      const reopened = new MetadataStore(root, { backend });
+      openStores.push(reopened);
+      await reopened.init();
+      await reopened.init();
+      expect(reopened.getGatewayListenerSettings("same")).toEqual({ port: 47011, conflictingPorts: [] });
+      expect(reopened.getGatewayListenerSettings("conflict")).toEqual({ port: null, conflictingPorts: [47021, 47022] });
+      expect(reopened.getGatewayListenerSettings("invalid")).toEqual({ port: null, conflictingPorts: [80, 47031] });
+      expect(reopened.getGatewayListenerSettings("string")).toEqual({ port: null, conflictingPorts: [] });
+      expect(reopened.getGatewayListenerSettings("explicit")).toEqual(preferences["gateway.listener.explicit"]);
+      expect(reopened.getGatewayListenerSettings("unresolved")).toEqual(preferences["gateway.listener.unresolved"]);
+      expect(reopened.getGatewayListenerSettings("new")).toEqual({ port: 46831, conflictingPorts: [] });
+      expect(reopened.listGatewayPools()).toEqual(expect.arrayContaining(cleanPools));
+      expect(reopened.listGatewayPools()).toHaveLength(cleanPools.length);
+      expect(reopened.getPreference("gateway.port")).toBeUndefined();
+      expect(reopened.getPreference("unrelated")).toEqual({ retained: true });
+      expect(reopened.getProviderLabels()).toEqual({ openai: "Preserved" });
+      expect(reopened.listSnapshots("same")).toEqual([{ id: "preserved", profile: "same", createdAt: "2026-11-04T00:00:00Z" }]);
+      reopened.close();
+      if (backend === "json") {
+        const persisted = JSON.parse(await fs.readFile(path.join(root, "metadata.sqlite.json"), "utf8"));
+        expect(persisted.gatewayPools.every((item: Record<string, unknown>) => !("port" in item))).toBe(true);
+        expect(persisted.preferences["gateway.listener.conflict"]).toEqual({ port: null, conflictingPorts: [47021, 47022] });
+      } else {
+        const database = new SqliteDatabaseSync(path.join(root, "metadata.sqlite"));
+        try {
+          const rows = database.prepare("SELECT payload FROM gateway_pools").all() as Array<{ payload: string }>;
+          expect(rows.every((row) => !("port" in JSON.parse(row.payload)))).toBe(true);
+          const setting = database.prepare("SELECT payload FROM preferences WHERE key = ?").get("gateway.listener.conflict") as { payload: string };
+          expect(JSON.parse(setting.payload)).toEqual({ port: null, conflictingPorts: [47021, 47022] });
+        } finally {
+          database.close();
+        }
+      }
+    }
+    const resolved = new MetadataStore(root, { backend });
+    openStores.push(resolved);
+    await resolved.init();
+    await resolved.setGatewayListenerPort("conflict", 48004);
+    expect(resolved.getGatewayListenerSettings("conflict")).toEqual({ port: 48004, conflictingPorts: [] });
+    expect(resolved.getGatewayListenerSettings("invalid").port).toBeNull();
+  });
+
   it("round-trips provider labels", async () => {
     const { store } = await makeStore(backend);
     expect(store.getProviderLabels()).toEqual({});
@@ -92,7 +200,7 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
       store.saveGatewayPool(workPool),
       store.recordGatewayProbe({ profile: "default", poolId: "same", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, status: 200, latencyMs: 12 }),
       store.recordGatewayProbe({ profile: "work", poolId: "same", upstreamId: "one", timestamp: "2026-11-04T00:00:01Z", ok: false, status: 503, latencyMs: 24 }),
-      store.setPreference("gateway.port", 47000),
+      store.setGatewayListenerPort("default", 47000),
       store.setProviderLabel("openai", "Local test provider"),
     ]);
     store.close();
@@ -104,7 +212,7 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
     expect(reopened.listGatewayPools("work")).toEqual([workPool]);
     expect(reopened.getGatewayHealth("default")["same:one"].lastStatus).toBe(200);
     expect(reopened.getGatewayHealth("work")["same:one"].lastStatus).toBe(503);
-    expect(reopened.getPreference("gateway.port")).toBe(47000);
+    expect(reopened.getGatewayListenerSettings("default")).toEqual({ port: 47000, conflictingPorts: [] });
     expect(reopened.getProviderLabels()).toEqual({ openai: "Local test provider" });
   });
 
@@ -248,33 +356,63 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
   it("stores preferences of every JSON shape", async () => {
     const { store } = await makeStore(backend);
     expect(store.getPreference("missing")).toBeUndefined();
-    await store.setPreference("gateway.port", 46999);
+    await store.setPreference("catalog.refresh", 46999);
     await store.setPreference("catalog.entries", [{ id: "custom" }]);
-    await store.setPreference("gateway.port", 47000);
-    expect(store.getPreference<number>("gateway.port")).toBe(47000);
+    await store.setPreference("catalog.refresh", 47000);
+    expect(store.getPreference<number>("catalog.refresh")).toBe(47000);
     expect(store.getPreference<Array<{ id: string }>>("catalog.entries")).toEqual([{ id: "custom" }]);
   });
 
   it("survives a reopen of the same directory", async () => {
     const { root, store } = await makeStore(backend);
-    await store.setPreference("gateway.port", 46123);
+    await store.setGatewayListenerPort("default", 46123);
     await store.replaceSessionCaches("default", [sessionCache("one")]);
 
     const reopened = new MetadataStore(root, { backend });
     await reopened.init();
     openStores.push(reopened);
-    expect(reopened.getPreference<number>("gateway.port")).toBe(46123);
+    expect(reopened.getGatewayListenerSettings("default")).toEqual({ port: 46123, conflictingPorts: [] });
     expect(reopened.listSessionSummaries("default").map((summary) => summary.id)).toEqual(["one"]);
   });
 });
 
 describe("MetadataStore migration", () => {
+  it("rolls back listener settings, pool port removal and obsolete preferences together", async () => {
+    const { root, store } = await makeStore("auto");
+    store.close();
+    const databasePath = path.join(root, "metadata.sqlite");
+    const legacy = { ...pool("legacy", "work"), port: 47011 };
+    const database = new SqliteDatabaseSync(databasePath);
+    try {
+      database.prepare("INSERT INTO gateway_pools VALUES (?, ?, ?)").run(legacy.id, legacy.profile, JSON.stringify(legacy));
+      database.prepare("INSERT INTO preferences VALUES (?, ?)").run("gateway.port", "49000");
+      database.exec("CREATE TRIGGER reject_listener_settings BEFORE INSERT ON preferences WHEN NEW.key LIKE 'gateway.listener.%' BEGIN SELECT RAISE(ABORT, 'listener migration blocked'); END;");
+    } finally {
+      database.close();
+    }
+    const migrating = new MetadataStore(root);
+    openStores.push(migrating);
+    await expect(migrating.init()).rejects.toThrow("listener migration blocked");
+    const preserved = new SqliteDatabaseSync(databasePath);
+    try {
+      expect(preserved.prepare("SELECT payload FROM gateway_pools").all()).toEqual([{ payload: JSON.stringify(legacy) }]);
+      expect(preserved.prepare("SELECT key, payload FROM preferences").all()).toEqual([{ key: "gateway.port", payload: "49000" }]);
+      preserved.exec("DROP TRIGGER reject_listener_settings");
+    } finally {
+      preserved.close();
+    }
+    await migrating.init();
+    expect(migrating.getGatewayListenerSettings("work")).toEqual({ port: 47011, conflictingPorts: [] });
+    expect(migrating.listGatewayPools("work")).toEqual([pool("legacy", "work")]);
+    expect(migrating.getPreference("gateway.port")).toBeUndefined();
+  });
+
   it("propagates JSON migration write failures without emptying loaded state", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-metadata-json-write-failure-"));
     tempRoots.push(root);
     const target = path.join(root, "metadata.sqlite.json");
     const legacy = { id: "legacy", poolId: "owned", upstreamId: "one", timestamp: "2026-08-24T00:00:00Z", ok: true, latencyMs: 20 };
-    const original = JSON.stringify({ version: 3, providerLabels: { openai: "Preserved" }, snapshots: [], gatewayPools: [pool("owned", "work")], gatewayProbeHistory: [legacy], sessionCaches: [], preferences: { "gateway.port": 46001 } });
+    const original = JSON.stringify({ version: 3, providerLabels: { openai: "Preserved" }, snapshots: [], gatewayPools: [{ ...pool("owned", "work"), port: 47011 }], gatewayProbeHistory: [legacy], sessionCaches: [], preferences: { "gateway.port": 46001 } });
     await fs.writeFile(target, original, "utf8");
     const store = new MetadataStore(root, { backend: "json" });
     openStores.push(store);
@@ -287,13 +425,16 @@ describe("MetadataStore migration", () => {
     }
     expect(store.listGatewayPools("work")).toEqual([pool("owned", "work")]);
     expect(store.getProviderLabels()).toEqual({ openai: "Preserved" });
-    expect(store.getPreference<number>("gateway.port")).toBe(46001);
+    expect(store.getPreference("gateway.port")).toBeUndefined();
+    expect(store.getGatewayListenerSettings("work")).toEqual({ port: 47011, conflictingPorts: [] });
     expect(store.listGatewayProbeHistory("work")).toEqual([{ ...legacy, profile: "work" }]);
     expect(await fs.readFile(target, "utf8")).toBe(original);
     await store.init();
     const persisted = JSON.parse(await fs.readFile(target, "utf8"));
     expect(persisted.gatewayProbeHistory).toEqual([{ ...legacy, profile: "work" }]);
     expect(persisted.providerLabels).toEqual({ openai: "Preserved" });
+    expect(persisted.gatewayPools).toEqual([pool("owned", "work")]);
+    expect(persisted.preferences["gateway.listener.work"]).toEqual({ port: 47011, conflictingPorts: [] });
   });
 
   it("transactionally upgrades the legacy SQLite pool key without losing data", async () => {
@@ -362,7 +503,7 @@ describe("MetadataStore migration", () => {
       expect(store.getGatewayHealth("work", "orphan")).toEqual({});
       expect(store.listGatewayProbeHistory("work", "orphan")).toEqual([]);
       expect(store.getProviderLabels()).toEqual({ openai: "Preserved" });
-      expect(store.getPreference<number>("gateway.port")).toBe(46001);
+      expect(store.getPreference("gateway.port")).toBeUndefined();
       expect(store.listSnapshots("work")).toEqual([snapshot]);
       expect(store.getSessionCache("work", cache.id)).toEqual(cache);
       if (round === 0) await store.saveGatewayPool(pool("orphan", "work"));
@@ -421,7 +562,7 @@ describe("MetadataStore migration", () => {
     await store.init();
     openStores.push(store);
     expect(store.getProviderLabels()).toEqual({ openai: "OpenAI" });
-    expect(store.getPreference<number>("gateway.port")).toBe(46831);
+    expect(store.getPreference("gateway.port")).toBeUndefined();
     expect(store.listSessionCaches("default")).toEqual([]);
     await expect(fs.readFile(path.join(root, "metadata.sqlite.json"), "utf8")).resolves.not.toContain("C:/sensitive");
   });
@@ -429,7 +570,7 @@ describe("MetadataStore migration", () => {
   it("uses the JSON file when the fallback is forced", async () => {
     const { root, store } = await makeStore("json");
     expect(store.activeBackend).toBe("json");
-    await store.setPreference("gateway.port", 46001);
+    await store.setGatewayListenerPort("default", 46001);
     await expect(fs.readFile(path.join(root, "metadata.sqlite.json"), "utf8")).resolves.toContain("46001");
   });
 

@@ -6,7 +6,7 @@ import type { GatewayPool } from "./domain";
 import { forwardGatewayRequest, GatewayServer, probeGatewayUpstream } from "./gateway";
 
 const pool: GatewayPool = {
-  id: "stream", profile: "default", virtualModel: "omp-switch/stream", port: 46831, enabled: true,
+  id: "stream", profile: "default", virtualModel: "omp-switch/stream", enabled: true,
   upstreams: ["one", "two"].map((id) => ({ id, providerId: "local", modelId: id, kind: "secret", enabled: true })),
 };
 const upstreams: http.Server[] = [];

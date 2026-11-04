@@ -539,11 +539,15 @@ export interface GatewayUpstream {
   enabled: boolean;
 }
 
+export interface GatewayListenerSettings {
+  port: number | null;
+  conflictingPorts: number[];
+}
+
 export interface GatewayPool {
   id: string;
   profile: string;
   virtualModel: string;
-  port: number;
   enabled: boolean;
   upstreams: GatewayUpstream[];
 }

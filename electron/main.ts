@@ -475,6 +475,8 @@ function registerIpc(): void {
     return overrides;
   });
   ipcMain.handle("gateway:list", (_event, profileId: string) => metadata.listGatewayPools(safeSessionProfileId(profileId)));
+  ipcMain.handle("gateway:listener-settings", (_event, profileId: string) => metadata.getGatewayListenerSettings(safeSessionProfileId(profileId)));
+  ipcMain.handle("gateway:set-port", (_event, profileId: string, port: number) => gatewayConfig.setPort(metadata, safeSessionProfileId(profileId), port));
   ipcMain.handle("gateway:save", (_event, pool: GatewayPool) => {
     safeSessionProfileId(pool.profile);
     return gatewayConfig.save(metadata, pool);

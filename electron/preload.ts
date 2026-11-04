@@ -1,9 +1,12 @@
+import type { GatewayListenerSettings } from "@omp-switch/core";
 import { contextBridge, ipcRenderer } from "electron";
 import type { ConfigPatch, DiscoveryResult, EffectiveConfig, GatewayPool, GatewayUpstreamHealth, ManagedSurfaceEntry, ProfileRef, SessionListPage, SessionMessagePage, SessionRefreshStats, SessionSearchResult, Snapshot, SurfaceBundle, UpdateStatus } from "@omp-switch/core";
 
 import type { McpConfigFile, McpConfigPreview } from "@omp-switch/core";
 import type { SessionDeleteResult } from "@omp-switch/core";
 const api = {
+  gatewayListenerSettings: (profileId: string): Promise<GatewayListenerSettings> => ipcRenderer.invoke("gateway:listener-settings", profileId),
+  setGatewayPort: (profileId: string, port: number): Promise<GatewayListenerSettings> => ipcRenderer.invoke("gateway:set-port", profileId, port),
   getInfo: () => ipcRenderer.invoke("app:info"),
   setTheme: (theme: "light" | "dark" | "system") => ipcRenderer.invoke("app:set-theme", theme),
   listProfiles: (): Promise<ProfileRef[]> => ipcRenderer.invoke("omp:list-profiles"),

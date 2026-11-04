@@ -109,6 +109,10 @@ It mirrors Oh My Pi's own auth-gateway posture:
   token accepted by that running instance. Unscoped, other-Profile and stopped status queries do
   not return it. Recovery neither loads nor creates a token file and adds no HTTP recovery route;
   `/healthz` and `/v1/models` do not include the token. Do not log token values.
+- Listener port settings are Profile-scoped trusted IPC, not HTTP capabilities. Ports must be integers
+  from 1024 through 65535; the listener remains bound to `127.0.0.1`. Pool saves, listener port writes,
+  start and stop share the lifecycle queue. A live owner's port cannot change before stopping, and
+  failed binds do not claim ownership. Conflicting legacy pool ports require explicit selection.
 - A **non-loopback `Host` header is rejected with 421.** A browser can reach `127.0.0.1`, so this is
   what defeats DNS rebinding.
 - Any request carrying an **`Origin` header is rejected with 403**, and no `Access-Control-Allow-*`

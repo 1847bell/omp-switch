@@ -4,6 +4,7 @@ import type {
   DiscoveryResult,
   EffectiveConfig,
   GatewayPool,
+  GatewayListenerSettings,
   McpConfigFile,
   McpConfigPreview,
   PatchPreview,
@@ -19,6 +20,8 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
   const memory: Record<string, EffectiveConfig> = {};
   const mcpFiles = new Map<string, McpConfigFile>();
   const gatewayPools = new Map<string, Map<string, GatewayPool>>();
+  const listenerSettings = new Map<string, GatewayListenerSettings>();
+  const getListenerSettings = (profileId: string): GatewayListenerSettings => structuredClone(listenerSettings.get(profileId) ?? { port: 46831, conflictingPorts: [] });
   let runningGateway: { profile: string; port: number; token: string } | null = null;
   let mcpRevision = 0;
   const sessionProfiles = new Map<string, SessionSummary[]>();
@@ -334,11 +337,17 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       };
     },
     setUsagePrice: async () => ({}),
+    gatewayListenerSettings: async (profileId) => getListenerSettings(profileId),
+    setGatewayPort: async (profileId, port) => {
+      if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Gateway port is invalid");
+      if (runningGateway?.profile === profileId && port !== runningGateway.port) throw new Error("Stop the gateway before changing its port");
+      const settings = { port, conflictingPorts: [] };
+      listenerSettings.set(profileId, settings);
+      return structuredClone(settings);
+    },
     listGatewayPools: async (profileId) => structuredClone([...gatewayPools.get(profileId)?.values() ?? []]),
     saveGatewayPool: async (pool) => {
-      if (runningGateway?.profile === pool.profile && pool.port !== runningGateway.port) {
-        throw new Error("Stop the gateway before changing its port");
-      }
+      if (Object.hasOwn(pool, "port")) throw new Error("Gateway listener port is configured per Profile, not per pool");
       const pools = gatewayPools.get(pool.profile) ?? new Map<string, GatewayPool>();
       pools.set(pool.id, structuredClone(pool));
       gatewayPools.set(pool.profile, pools);
@@ -350,9 +359,11 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
     startGateway: async (profileId) => {
       const pool = [...gatewayPools.get(profileId)?.values() ?? []].find((candidate) => candidate.enabled);
       if (!pool) throw new Error("No enabled gateway pools exist for this profile");
-      if (runningGateway && runningGateway.port !== pool.port) throw new Error("Stop the gateway before changing its port");
-      runningGateway = { profile: profileId, port: pool.port, token: "demo-gateway-token" };
-      return { running: true, profileId, port: pool.port, token: runningGateway.token };
+      const { port } = getListenerSettings(profileId);
+      if (port === null) throw new Error("Select and save a listener port before starting the gateway");
+      if (runningGateway && runningGateway.port !== port) throw new Error("Stop the gateway before changing its port");
+      runningGateway = { profile: profileId, port, token: "demo-gateway-token" };
+      return { running: true, profileId, port, token: runningGateway.token };
     },
     stopGateway: async (expectedProfileId) => {
       if (runningGateway && runningGateway.profile !== expectedProfileId) throw new Error("The active gateway profile changed; refresh before stopping it");

@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 function pool(profile: string): GatewayPool {
-  return { id: "shared", profile, virtualModel: `omp-switch/${profile}`, port: 46831, enabled: true, upstreams: [{ id: "one", providerId: "local", modelId: "model", kind: "secret", credentialId: "test", enabled: true }] };
+  return { id: "shared", profile, virtualModel: `omp-switch/${profile}`, enabled: true, upstreams: [{ id: "one", providerId: "local", modelId: "model", kind: "secret", credentialId: "test", enabled: true }] };
 }
 
 async function mount(api = createMockApi()) {
@@ -425,5 +425,146 @@ describe("gateway connection recovery", () => {
     expect(token(view.container)?.value).toBe("work-only-token");
     expect(view.container.textContent).toContain(view.runningLabel("work"));
     expect(view.container.textContent).not.toContain(view.runningLabel("default"));
+  });
+});
+
+describe("gateway Profile listener settings", () => {
+  const portInput = (container: HTMLElement) => container.querySelector<HTMLInputElement>("input[name='listenerPort']")!;
+  const action = (container: HTMLElement, key: string, profile = "default") => [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === i18n.t(key, { profile }))!;
+  const editPort = async (container: HTMLElement, value: string) => {
+    const input = portInput(container);
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  };
+
+  it("saves and reloads the Profile port without a pool or pool draft", async () => {
+    const api = createMockApi();
+    const view = await mount(api);
+    await editPort(view.container, "49123");
+    await view.click("gateway.savePort", "default");
+    expect(await api.gatewayListenerSettings("default")).toEqual({ port: 49123, conflictingPorts: [] });
+    expect(await api.listGatewayPools("default")).toEqual([]);
+    await editPort(view.container, "49124");
+    await view.refresh();
+    expect(portInput(view.container).value).toBe("49123");
+    await view.render("work");
+    await view.render("default");
+    expect(portInput(view.container).value).toBe("49123");
+  });
+
+  it("blocks start on unsaved port edits without implicitly saving either configuration", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    await view.editModel("omp-switch/unsaved");
+    const previous = await api.gatewayListenerSettings("default");
+    await editPort(view.container, "49123");
+    expect(action(view.container, "gateway.start").disabled).toBe(true);
+    expect(view.container.textContent).toContain(i18n.t("gateway.portSaveFirst"));
+    await view.click("gateway.start", "default");
+    expect((await api.gatewayStatus("default")).running).toBe(false);
+    expect(await api.gatewayListenerSettings("default")).toEqual(previous);
+    expect((await api.listGatewayPools("default"))[0]).toEqual(pool("default"));
+    await view.click("gateway.savePort", "default");
+    expect(action(view.container, "gateway.start").disabled).toBe(false);
+    expect((await api.listGatewayPools("default"))[0]).toEqual(pool("default"));
+    await view.click("gateway.start", "default");
+    expect(await api.gatewayStatus("default")).toMatchObject({ running: true, port: 49123 });
+  });
+
+  it("requires an explicit saved choice for conflicting legacy ports", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const getSettings = api.gatewayListenerSettings;
+    let unresolved = true;
+    api.gatewayListenerSettings = async (profile) => unresolved ? { port: null, conflictingPorts: [48111, 49222] } : getSettings(profile);
+    const save = api.setGatewayPort;
+    api.setGatewayPort = async (profile, port) => { const settings = await save(profile, port); unresolved = false; return settings; };
+    const view = await mount(api);
+    await view.selectPool();
+    expect(portInput(view.container).value).toBe("");
+    expect(view.container.textContent).toContain("48111, 49222");
+    expect(action(view.container, "gateway.start").disabled).toBe(true);
+    await editPort(view.container, "49222");
+    expect(action(view.container, "gateway.start").disabled).toBe(true);
+    await view.click("gateway.savePort", "default");
+    expect(action(view.container, "gateway.start").disabled).toBe(false);
+    expect(view.container.textContent).not.toContain("48111, 49222");
+    await view.refresh();
+    expect(portInput(view.container).value).toBe("49222");
+  });
+
+  it.each(["", "1023", "65536", "48123.5", "invalid"])("does not save or start with invalid listener input %s", async (value) => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const previous = await api.gatewayListenerSettings("default");
+    const view = await mount(api);
+    await view.selectPool();
+    await editPort(view.container, value);
+    expect(action(view.container, "gateway.savePort").disabled).toBe(true);
+    expect(action(view.container, "gateway.start").disabled).toBe(true);
+    if (value) expect(view.container.textContent).toContain(i18n.t("gateway.portInvalid"));
+    await view.click("gateway.savePort", "default");
+    expect(await api.gatewayListenerSettings("default")).toEqual(previous);
+  });
+
+  it("keeps listener controls outside existing and new pool drafts", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    expect(view.container.querySelectorAll("input[name='listenerPort']")).toHaveLength(1);
+    expect(view.container.querySelector(".gateway-editor input[name='listenerPort']")).toBeNull();
+    expect(view.container.querySelectorAll(".gateway-editor input[inputmode='numeric']")).toHaveLength(0);
+    await view.click("common.add", "default");
+    expect(view.container.querySelectorAll(".gateway-editor input[inputmode='numeric']")).toHaveLength(0);
+    await view.save();
+    expect((await api.listGatewayPools("default")).every((saved) => !("port" in saved))).toBe(true);
+  });
+
+  it("preserves the saved setting and unsaved input when saving fails", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const previous = await api.gatewayListenerSettings("default");
+    api.setGatewayPort = async () => { throw new Error("Listener settings write failed"); };
+    const view = await mount(api);
+    await view.selectPool();
+    await editPort(view.container, "49123");
+    await view.click("gateway.savePort", "default");
+    expect(portInput(view.container).value).toBe("49123");
+    expect(await api.gatewayListenerSettings("default")).toEqual(previous);
+    expect(action(view.container, "gateway.start").disabled).toBe(true);
+    expect(action(view.container, "gateway.savePort").disabled).toBe(false);
+    expect(view.notices).toContainEqual({ tone: "error", text: "Listener settings write failed" });
+    await view.refresh();
+    expect(portInput(view.container).value).toBe(String(previous.port));
+  });
+
+  it("locks the active owner's setting but allows another Profile to save independently, refusing a different-port switch", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    await api.saveGatewayPool(pool("work"));
+    const active = await api.startGateway("default");
+    const view = await mount(api);
+    expect(portInput(view.container).disabled).toBe(true);
+    expect(action(view.container, "gateway.savePort").disabled).toBe(true);
+    await expect(api.setGatewayPort("default", 49123)).rejects.toThrow("Stop the gateway");
+    await view.render("work");
+    expect(portInput(view.container).disabled).toBe(false);
+    await editPort(view.container, "49123");
+    await view.click("gateway.savePort", "work");
+    expect(await api.gatewayListenerSettings("work")).toEqual({ port: 49123, conflictingPorts: [] });
+    await view.selectPool();
+    await view.click("gateway.switchProfile", "work");
+    expect(await api.gatewayStatus("default")).toMatchObject({ running: true, profileId: "default", port: active.port, token: active.token });
+    expect(view.container.querySelector("input[name='bearerToken']")).toBeNull();
+    expect(view.notices.some((notice) => notice.tone === "error" && notice.text.includes("Stop the gateway"))).toBe(true);
+    await view.render("default");
+    expect(portInput(view.container).value).toBe(String(active.port));
+    expect(view.container.querySelector<HTMLInputElement>("input[name='bearerToken']")?.value).toBe(active.token);
+    await view.click("gateway.stop", "default");
+    expect(portInput(view.container).disabled).toBe(false);
+    await view.render("work");
+    expect(portInput(view.container).value).toBe("49123");
   });
 });

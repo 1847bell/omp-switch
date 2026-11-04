@@ -1,9 +1,12 @@
+import type { GatewayListenerSettings } from "@omp-switch/core";
 import type { PromptLibraryView, PromptLibraryMetadata, PromptLibraryText, PromptAdoptionPreview, PromptWriteSnapshot } from "@omp-switch/core";
 import type { ConfigPatch, DiscoveryResult, EffectiveConfig, GatewayPool, GatewayUpstreamHealth, GatewayUpstreamStat, ManagedSurfaceEntry, ModelPrice, PatchPreview, PricingTable, ProfileRef, ProjectContext, ProviderPreset, SessionListPage, SessionMessagePage, SessionRefreshStats, SessionSearchResult, Snapshot, SurfaceBundle, UpdateStatus, UsageReport } from "@omp-switch/core";
 import type { McpConfigFile, McpConfigPreview } from "@omp-switch/core";
 import type { SessionDeleteResult } from "@omp-switch/core";
 
 export interface OmpSwitchApi {
+  gatewayListenerSettings(profileId: string): Promise<GatewayListenerSettings>;
+  setGatewayPort(profileId: string, port: number): Promise<GatewayListenerSettings>;
   getInfo(): Promise<{ version: string; platform: string; installation: { executable: string | null; version: string | null; supported: boolean; reason?: string; schemaMajor?: number; schemaStatus?: string } }>;
   setTheme(theme: "light" | "dark" | "system"): Promise<void>;
   listProfiles(): Promise<ProfileRef[]>;

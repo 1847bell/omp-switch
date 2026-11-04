@@ -3,6 +3,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   evaluateUpstreamHealth,
+  DEFAULT_GATEWAY_PORT,
+  validateGatewayPort,
+  type GatewayListenerSettings,
   type GatewayPool,
   type GatewayProbeRecord,
   type GatewayUpstreamHealth,
@@ -48,6 +51,39 @@ function asStringRecord(value: unknown): Record<string, string> {
   const record = asObject(value);
   if (!record) return {};
   return Object.fromEntries(Object.entries(record).filter((item): item is [string, string] => typeof item[1] === "string"));
+}
+
+function migrateGatewayListeners(pools: GatewayPool[], preferences: Record<string, unknown>): boolean {
+  const portsByProfile = new Map<string, unknown[]>();
+  let changed = false;
+  for (const pool of pools) {
+    const ports = portsByProfile.get(pool.profile) ?? [];
+    const legacy = pool as GatewayPool & { port?: unknown };
+    if (Object.hasOwn(legacy, "port")) {
+      ports.push(legacy.port);
+      delete legacy.port;
+      changed = true;
+    }
+    portsByProfile.set(pool.profile, ports);
+  }
+  for (const [profile, ports] of portsByProfile) {
+    const key = `gateway.listener.${profile}`;
+    if (Object.hasOwn(preferences, key)) continue;
+    const numericPorts = [...new Set(ports.filter((port): port is number => typeof port === "number" && Number.isFinite(port)))].sort((a, b) => a - b);
+    const allValid = ports.every((port) => typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535);
+    const settings: GatewayListenerSettings = ports.length === 0
+      ? { port: DEFAULT_GATEWAY_PORT, conflictingPorts: [] }
+      : allValid && numericPorts.length === 1
+        ? { port: numericPorts[0], conflictingPorts: [] }
+        : { port: null, conflictingPorts: numericPorts };
+    preferences[key] = settings;
+    changed = true;
+  }
+  if (Object.hasOwn(preferences, "gateway.port")) {
+    delete preferences["gateway.port"];
+    changed = true;
+  }
+  return changed;
 }
 
 type LegacySessionCache = SessionFileCache & { messageOffsets?: unknown };
@@ -175,6 +211,19 @@ export class MetadataStore {
         const profile = record.profile ?? (profiles.length === 1 ? profiles[0].profile : "");
         update.run(profile, JSON.stringify({ ...record, profile }), row.id);
       }
+      const poolRows = db.prepare("SELECT id, profile, payload FROM gateway_pools").all() as Array<{ id: string; profile: string; payload: string }>;
+      const pools = poolRows.map((row) => JSON.parse(row.payload) as GatewayPool);
+      const preferenceRows = db.prepare("SELECT key, payload FROM preferences").all() as Array<{ key: string; payload: string }>;
+      const preferences = Object.fromEntries(preferenceRows.map((row) => [row.key, JSON.parse(row.payload) as unknown]));
+      if (migrateGatewayListeners(pools, preferences)) {
+        const updatePool = db.prepare("UPDATE gateway_pools SET payload = ? WHERE profile = ? AND id = ?");
+        pools.forEach((pool, index) => updatePool.run(JSON.stringify(pool), poolRows[index].profile, poolRows[index].id));
+        const insertSettings = db.prepare("INSERT INTO preferences(key, payload) VALUES(?, ?) ON CONFLICT(key) DO NOTHING");
+        for (const [key, settings] of Object.entries(preferences)) {
+          if (key.startsWith("gateway.listener.")) insertSettings.run(key, JSON.stringify(settings));
+        }
+        db.prepare("DELETE FROM preferences WHERE key = ?").run("gateway.port");
+      }
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
@@ -233,7 +282,8 @@ export class MetadataStore {
         record.profile = owners.size === 1 ? owners.values().next().value! : "";
         migratedHistory = true;
       }
-      needsPersistence = !isCurrent || "sessionIndex" in parsed || hasLegacyCacheFields || migratedHistory;
+      const migratedListeners = migrateGatewayListeners(this.fallback.gatewayPools, this.fallback.preferences);
+      needsPersistence = !isCurrent || "sessionIndex" in parsed || hasLegacyCacheFields || migratedHistory || migratedListeners;
     } catch {
       this.fallback = empty;
     }
@@ -294,6 +344,16 @@ export class MetadataStore {
     }
     const item = this.fallback.snapshots.find((snapshot) => snapshot.profile === profile);
     return item ? item as unknown as Snapshot : null;
+  }
+
+  getGatewayListenerSettings(profile: string): GatewayListenerSettings {
+    const settings = this.getPreference<GatewayListenerSettings>(`gateway.listener.${profile}`);
+    return settings ? { ...settings, conflictingPorts: [...settings.conflictingPorts] } : { port: DEFAULT_GATEWAY_PORT, conflictingPorts: [] };
+  }
+
+  async setGatewayListenerPort(profile: string, port: number): Promise<void> {
+    validateGatewayPort(port);
+    await this.setPreference(`gateway.listener.${profile}`, { port, conflictingPorts: [] });
   }
 
   async saveGatewayPool(pool: GatewayPool): Promise<void> {

@@ -1,4 +1,4 @@
-import { GatewayServer, validateGatewayPool, type GatewayForwarder, type GatewayPool } from "@omp-switch/core";
+import { GatewayServer, validateGatewayPool, validateGatewayPort, type GatewayForwarder, type GatewayListenerSettings, type GatewayPool } from "@omp-switch/core";
 import type { MetadataStore } from "./metadata-store";
 
 interface ActiveGateway {
@@ -34,11 +34,28 @@ export class GatewayConfigCoordinator {
       : { running: false, profileId: null, port: null, upstreams: [] };
   }
 
+  setPort(store: MetadataStore, profileId: string, port: number): Promise<GatewayListenerSettings> {
+    return this.runExclusive(async () => {
+      validateGatewayPort(port);
+      const active = this.active;
+      if (active?.server.running && active.profile === profileId && port !== active.port) {
+        throw new Error("Stop the gateway before changing its port");
+      }
+      await store.setGatewayListenerPort(profileId, port);
+      return store.getGatewayListenerSettings(profileId);
+    });
+  }
+
   start(store: MetadataStore, profileId: string): Promise<{ running: true; profileId: string; port: number; token: string }> {
     return this.runExclusive(async () => {
       const pools = store.listGatewayPools(profileId).filter((pool) => pool.enabled);
       if (!pools.length) throw new Error("No enabled gateway pools exist for this profile");
-      const port = pools[0].port;
+      const settings = store.getGatewayListenerSettings(profileId);
+      if (settings.port === null) {
+        throw new Error(`Legacy gateway pool ports are inconsistent or invalid (${settings.conflictingPorts.join(", ")}). Choose and save one listener port for Profile ${profileId}`);
+      }
+      const port = settings.port;
+      validateGatewayPort(port);
       const active = this.active;
       if (active && port !== active.port) throw new Error("Stop the gateway before changing its port");
       const token = await this.dependencies.loadToken();
@@ -62,7 +79,6 @@ export class GatewayConfigCoordinator {
         },
       };
       if (active) {
-        await store.setPreference("gateway.port", port);
         active.server.setConfiguration(pools, forwarder, token);
         this.active = { ...active, profile: profileId, token };
         return { running: true, profileId, port, token };
@@ -71,10 +87,12 @@ export class GatewayConfigCoordinator {
       let boundPort: number;
       try {
         boundPort = await server.start(port);
-        await store.setPreference("gateway.port", boundPort);
       } catch (error) {
         if (server.running) await server.stop();
         await Promise.all(this.probeWrites);
+        if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+          throw new Error(`Gateway port ${port} is already in use; choose another port or stop the other service`, { cause: error });
+        }
         throw error;
       }
       this.active = { server, profile: profileId, port: boundPort, token };
@@ -97,9 +115,6 @@ export class GatewayConfigCoordinator {
     return this.runExclusive(async () => {
       validateGatewayPool(pool);
       const active = this.active;
-      if (active?.server.running && active.profile === pool.profile && pool.port !== active.port) {
-        throw new Error("Stop the gateway before changing its port");
-      }
       await store.saveGatewayPool(pool);
       if (active?.server.running && active.profile === pool.profile) {
         active.server.setPools(store.listGatewayPools(pool.profile).filter((candidate) => candidate.enabled));
