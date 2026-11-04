@@ -201,3 +201,51 @@ describe("gateway active profile ownership", () => {
     expect(view.container.querySelector("input[name='bearerToken']")).toBeNull();
   });
 });
+
+describe("gateway upstream identity", () => {
+  it("keeps new upstream identities unique through deletion, addition and reordering without reusing deleted IDs", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams = [1, 2, 3].map((number) => ({ ...saved.upstreams[0], id: `upstream-${number}` }));
+    await api.saveGatewayPool(saved);
+    const view = await mount(api);
+    await view.selectPool();
+    const ids = () => [...view.container.querySelectorAll<HTMLInputElement>(".upstream-row input[name$='.id']")].map((input) => input.value);
+    const action = async (key: string, row?: number) => {
+      const scope = row === undefined ? view.container : view.container.querySelectorAll(".upstream-row")[row];
+      const button = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.getAttribute("aria-label") === i18n.t(key))!;
+      await act(async () => { button.click(); });
+    };
+    const seen = new Set(ids());
+    await action("gateway.deleteUpstream", 1);
+    await action("gateway.addUpstream");
+    const added = ids()[2];
+    expect(ids().slice(0, 2)).toEqual(["upstream-1", "upstream-3"]);
+    expect(seen.has(added)).toBe(false);
+    seen.add(added);
+    await action("gateway.moveUpstreamUp", 2);
+    expect(ids()).toEqual(["upstream-1", added, "upstream-3"]);
+    await action("gateway.deleteUpstream", 1);
+    await action("gateway.addUpstream");
+    expect(seen.has(ids()[2])).toBe(false);
+    expect(new Set(ids()).size).toBe(3);
+  });
+
+  it("reports manually duplicated IDs and does not save or start the invalid draft", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams.push({ ...saved.upstreams[0], id: "two" });
+    await api.saveGatewayPool(saved);
+    const view = await mount(api);
+    await view.selectPool();
+    const input = view.container.querySelector<HTMLInputElement>("input[name='upstreams.1.id']")!;
+    input.focus();
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "one"); input.dispatchEvent(new Event("input", { bubbles: true })); });
+    expect(document.activeElement).toBe(input);
+    await view.save();
+    await view.click("gateway.start", "default");
+    expect(view.notices).toContainEqual({ tone: "error", text: i18n.t("gateway.duplicateUpstreamId", { id: "one" }) });
+    expect((await api.listGatewayPools("default"))[0]).toEqual(saved);
+    expect((await api.gatewayStatus()).running).toBe(false);
+  });
+});

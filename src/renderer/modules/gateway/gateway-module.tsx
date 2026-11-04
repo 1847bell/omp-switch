@@ -35,12 +35,16 @@ interface GatewayProps {
   providers: Array<[string, OmpProvider]>;
 }
 
+function makeGatewayUpstream(providerId: string, modelId: string): GatewayUpstream {
+  return { id: `upstream-${crypto.randomUUID()}`, providerId, modelId, kind: "secret", enabled: true };
+}
+
 function makeGatewayPool(profileId: string, providers: Array<[string, OmpProvider]>): GatewayPool {
   const first = providers[0];
   const model = first && Array.isArray(first[1].models) ? first[1].models[0] : undefined;
   const providerId = first?.[0] ?? "";
   const modelId = model?.id ?? "";
-  const upstream: GatewayUpstream = { id: "upstream-1", providerId, modelId, kind: "secret", enabled: true };
+  const upstream = makeGatewayUpstream(providerId, modelId);
   return { id: `pool-${Date.now().toString(36)}`, profile: profileId, virtualModel: "omp-switch/default", port: 46831, enabled: true, upstreams: [upstream] };
 }
 
@@ -52,6 +56,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const { t } = useTranslation();
   const [pools, setPools] = useState<GatewayPool[]>([]);
   const [draft, setDraft] = useState<GatewayPool | null>(null);
+  const [upstreamRowKeys] = useState(() => new WeakMap<GatewayUpstream, string>());
   const [status, setStatus] = useState<{ running: boolean; profileId: string | null; port: number | null; upstreams: GatewayUpstreamStat[] }>({ running: false, profileId: null, port: null, upstreams: [] });
   const [token, setToken] = useState<string | null>(null);
   const [healthMap, setHealthMap] = useState<Record<string, GatewayUpstreamHealth>>({});
@@ -86,8 +91,24 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     setDraft((current) => current ? { ...current, [key]: value } : current);
   }
 
+  function openDraft(pool: GatewayPool): void {
+    for (const upstream of pool.upstreams) upstreamRowKeys.set(upstream, crypto.randomUUID());
+    setDraft(pool);
+  }
+
   function updateUpstream(index: number, patch: Partial<GatewayUpstream>): void {
-    setDraft((current) => current ? { ...current, upstreams: current.upstreams.map((upstream, itemIndex) => itemIndex === index ? { ...upstream, ...patch } : upstream) } : current);
+    setDraft((current) => current ? { ...current, upstreams: current.upstreams.map((upstream, itemIndex) => {
+      if (itemIndex !== index) return upstream;
+      const updated = { ...upstream, ...patch };
+      upstreamRowKeys.set(updated, upstreamRowKeys.get(upstream)!);
+      return updated;
+    }) } : current);
+  }
+
+  function addUpstream(): void {
+    const upstream = makeGatewayUpstream(providers[0]?.[0] ?? "", modelOptions[0]?.modelId ?? "");
+    upstreamRowKeys.set(upstream, crypto.randomUUID());
+    setDraft((current) => current ? { ...current, upstreams: [...current.upstreams, upstream] } : current);
   }
 
   function moveUpstream(index: number, direction: "up" | "down"): void {
@@ -105,11 +126,16 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   async function saveDraft(): Promise<GatewayPool | null> {
     if (!draft || draft.profile !== profileId) return null;
     if (!draft.id.trim() || !draft.virtualModel.trim()) return onNotice({ tone: "error", text: t("gateway.poolIdVirtualModelRequired") }), null;
+    const upstreamIds = new Set<string>();
+    for (const upstream of draft.upstreams) {
+      if (upstreamIds.has(upstream.id)) return onNotice({ tone: "error", text: t("gateway.duplicateUpstreamId", { id: upstream.id }) }), null;
+      upstreamIds.add(upstream.id);
+    }
     setLoading(true);
     try {
       const saved = await api.saveGatewayPool({ ...draft, id: draft.id.trim(), virtualModel: draft.virtualModel.trim() });
       setPools((current) => [saved, ...current.filter((pool) => pool.id !== saved.id)]);
-      setDraft(saved);
+      openDraft(saved);
       onNotice({ tone: "success", text: t("gateway.poolSaved", { profile: profileId }) });
       return saved;
     } catch (error) {
@@ -229,7 +255,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
             <RefreshCw size={16} className={loading ? "spin" : ""} />
           </IconButton>
           {pools.length > 0 ? (
-            <button className="primary-button" onClick={() => setDraft(makeGatewayPool(profileId, providers))} disabled={readOnly}>
+            <button className="primary-button" onClick={() => openDraft(makeGatewayPool(profileId, providers))} disabled={readOnly}>
               <Plus size={16} />{t("common.add")}
             </button>
           ) : null}
@@ -241,7 +267,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
           <strong>{t("gateway.empty")}</strong>
           <span className="empty-desc">{t("gateway.emptyHint")}</span>
           <div className="empty-actions">
-            <button className="primary-button" onClick={() => setDraft(makeGatewayPool(profileId, providers))} disabled={readOnly}>
+            <button className="primary-button" onClick={() => openDraft(makeGatewayPool(profileId, providers))} disabled={readOnly}>
               <Plus size={15} />{t("gateway.newPool")}
             </button>
           </div>
@@ -250,7 +276,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
       <div className={`gateway-layout${pools.length === 0 ? " gateway-layout--editor-only" : ""}`}>
         {pools.length > 0 ? <div className="module-list-panel">
           {pools.map((pool) => (
-            <button key={pool.id} className={`module-list-row ${draft?.id === pool.id ? "active" : ""}`} onClick={() => setDraft(pool)}>
+            <button key={pool.id} className={`module-list-row ${draft?.id === pool.id ? "active" : ""}`} onClick={() => openDraft(pool)}>
               <span className="module-row-main">
                 <strong>{pool.virtualModel}</strong>
                 <small>{pool.id} · {t("gateway.upstreamCount", { count: pool.upstreams.length })} · {pool.port}</small>
@@ -307,7 +333,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                     </button>
                     <IconButton
                       label={t("gateway.addUpstream")}
-                      onClick={() => setDraft((current) => current ? { ...current, upstreams: [...current.upstreams, { id: `upstream-${current.upstreams.length + 1}`, providerId: providers[0]?.[0] ?? "", modelId: modelOptions[0]?.modelId ?? "", kind: "secret", enabled: true }] } : current)}
+                      onClick={addUpstream}
                     >
                       <Plus size={15} />
                     </IconButton>
@@ -321,7 +347,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                   const latency = probeResult?.latencyMs ?? health?.lastLatencyMs;
 
                   return (
-                    <div className="upstream-row" key={upstream.id}>
+                    <div className="upstream-row" key={upstreamRowKeys.get(upstream)}>
                       <div className="upstream-reorder-buttons">
                         <IconButton label={t("gateway.moveUpstreamUp")} variant="subtle" disabled={index === 0} onClick={() => moveUpstream(index, "up")}>
                           <ChevronUp size={13} />

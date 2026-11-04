@@ -13,6 +13,7 @@
 - Gateway cancellation and idle timeouts remain active through response-body consumption. Response headers and body chunks renew the idle deadline, allowing healthy SSE streams to continue; stalled or cancelled streams release the upstream without failover or a second response.
 - Compressed gateway JSON and SSE responses no longer carry stale encoding or compressed-length headers after Node fetch decodes their bodies. Direct forwarding uses the same normalized headers, while unsupported content-coding chains retain their original bytes and encoding metadata.
 - Gateway probes and pre-response retries now cancel abandoned upstream fetches, releasing unread or infinite bodies without relying on garbage collection. The final selected JSON/SSE response retains its own cancellation and timeout lifecycle.
+- New gateway upstreams use unique IDs that do not reuse deleted upstream identities. Draft row keys are independent of editable IDs, preserving input focus and avoiding duplicate React keys while editing. The editor and save boundary reject duplicate IDs within a pool, including disabled upstreams, before persistence or live routing changes.
 
 ## 1.0.2 - 2026-11-02
 

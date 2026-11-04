@@ -146,6 +146,16 @@ describe.each(["auto", "json"] as const)("production gateway save boundary (%s)"
     expect((await request("virtual/accepted")).status).toBe(200);
   });
 
+  it.each([true, false])("rejects duplicate upstream IDs before persistence even when enabled=%s", async (enabled) => {
+    const { store, config, pool, start, request } = await fixture(backend);
+    await start();
+    const duplicate = { ...pool, virtualModel: "virtual/rejected-duplicate", upstreams: [pool.upstreams[0], { ...pool.upstreams[1], id: pool.upstreams[0].id, enabled }] };
+    await expect(config.save(store, duplicate)).rejects.toThrow(/duplicate.*one/i);
+    expect(store.listGatewayPools("alpha")[0]).toEqual(pool);
+    expect(await (await request(pool.virtualModel)).json()).toMatchObject({ model: "model-one" });
+    expect((await request(duplicate.virtualModel)).status).toBe(404);
+  });
+
   it("serializes concurrent saves with start and stop without stale routes or resurrection", async () => {
     const { store, config, pool, start, stop, request } = await fixture(backend);
     const starting = start();
