@@ -60,6 +60,7 @@ export interface OmpSwitchApi {
   setUsagePrice(key: string, price: ModelPrice | null): Promise<PricingTable>;
   listGatewayPools(profileId: string): Promise<GatewayPool[]>;
   saveGatewayPool(pool: GatewayPool): Promise<GatewayPool>;
+  deleteGatewayPool(profileId: string, poolId: string): Promise<void>;
   gatewayStatus(profileId: string): Promise<{ running: boolean; profileId: string | null; port: number | null; upstreams: GatewayUpstreamStat[]; token?: string }>;
   gatewayHealth(profileId: string, poolId?: string): Promise<Record<string, GatewayUpstreamHealth>>;
   probeGatewayUpstream(profileId: string, poolId: string, upstreamId: string, timeoutMs?: number): Promise<{ ok: boolean; status?: number; latencyMs: number; error?: string }>;

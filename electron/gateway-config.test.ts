@@ -114,6 +114,12 @@ describe.each(["auto", "json"] as const)("production gateway save boundary (%s)"
     expect(await (await request(renamed.virtualModel)).json()).toMatchObject({ route: "/alpha/original/first/v1/chat/completions", model: "model-one" });
     await config.save(store, { ...disabledFirst, upstreams: [{ ...pool.upstreams[1], modelId: "replacement-model" }] });
     expect(await (await request(renamed.virtualModel)).json()).toMatchObject({ route: "/alpha/original/second/v1/chat/completions", model: "replacement-model" });
+    const allDisabled = { ...renamed, upstreams: pool.upstreams.map((target) => ({ ...target, enabled: false })) };
+    await config.save(store, allDisabled);
+    expect((await request(renamed.virtualModel)).status).toBe(503);
+    expect(config.status().upstreams).toEqual([]);
+    await config.save(store, { ...allDisabled, upstreams: [pool.upstreams[1]] });
+    expect(await (await request(renamed.virtualModel)).json()).toMatchObject({ model: "model-two" });
   });
 
   it("keeps listening with no enabled pools and re-enables the last pool without restarting", async () => {
@@ -401,5 +407,105 @@ describe.each(["auto", "json"] as const)("profile listener settings (%s)", (back
     expect(config.status().port).toBe(port);
     expect((await request(pool.virtualModel)).status).toBe(200);
     expect((await request(obsolete.virtualModel)).status).toBe(404);
+  });
+});
+
+describe.each(["auto", "json"] as const)("gateway pool deletion (%s)", (backend) => {
+  it("removes only the selected Profile route and stats, leaving the last empty listener explicitly stoppable", async () => {
+    const { store, config, pool, port, start, stop, request, models } = await fixture(backend);
+    const second = { ...pool, id: "second", virtualModel: "virtual/second", upstreams: [pool.upstreams[1]] };
+    await config.save(store, second);
+    await config.save(store, { ...pool, profile: "beta" });
+    await start();
+    await (await request(pool.virtualModel)).text();
+    await (await request(second.virtualModel)).text();
+    await config.delete(store, "beta", pool.id);
+    expect(await (await request(pool.virtualModel)).json()).toMatchObject({ model: "model-one" });
+    await config.delete(store, "alpha", pool.id);
+    expect((await request(pool.virtualModel)).status).toBe(404);
+    expect((await models()).data.map((entry) => entry.id)).toEqual([second.virtualModel]);
+    expect(store.getGatewayHealth("alpha", pool.id)).toEqual({});
+    expect(config.status("alpha")).toMatchObject({ running: true, profileId: "alpha", port, token: "test-token",
+      upstreams: [expect.objectContaining({ poolId: second.id, upstreamId: "two", lastStatus: 200 })] });
+    expect(await (await request(second.virtualModel)).json()).toMatchObject({ model: "model-two" });
+    await config.delete(store, "alpha", second.id);
+    expect((await models()).data).toEqual([]);
+    expect((await request(second.virtualModel)).status).toBe(404);
+    expect(config.status("alpha")).toMatchObject({ running: true, port, token: "test-token", upstreams: [] });
+    expect(store.getGatewayListenerSettings("alpha").port).toBe(port);
+    await stop();
+    await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
+  });
+
+  it("allows an admitted request to finish without repopulating a deleted and recreated pool's health or stats", async () => {
+    const { store, config, pool, start, stop, request, controls } = await fixture(backend);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const admitted = new Promise<void>((resolve) => { entered = resolve; });
+    controls.beforeResolve = async () => { entered(); await gate; };
+    await start();
+    const pending = request(pool.virtualModel);
+    try {
+      await admitted;
+      await config.delete(store, "alpha", pool.id);
+      await config.save(store, { ...pool, virtualModel: "virtual/recreated", upstreams: [{ ...pool.upstreams[0], modelId: "new-model" }] });
+    } finally {
+      release();
+    }
+    expect(await (await pending).json()).toMatchObject({ model: "model-one" });
+    expect(store.getGatewayHealth("alpha", pool.id)).toEqual({});
+    expect(config.status().upstreams).toEqual([]);
+    expect(await (await request("virtual/recreated")).json()).toMatchObject({ model: "new-model" });
+    expect(config.status().upstreams).toEqual([expect.objectContaining({ poolId: pool.id, upstreamId: "one", lastStatus: 200 })]);
+    await stop();
+    expect(store.listGatewayProbeHistory("alpha", pool.id, "one")).toEqual([expect.objectContaining({ ok: true, status: 200 })]);
+  });
+
+  it("keeps the saved pool and running route on a failed deletion and permits retry", async () => {
+    const { store, config, pool, start, request, models } = await fixture(backend);
+    await start();
+    const write = vi.spyOn(store, "deleteGatewayPool").mockRejectedValueOnce(new Error("delete persistence failed"));
+    await expect(config.delete(store, "alpha", pool.id)).rejects.toThrow("delete persistence failed");
+    expect(store.listGatewayPools("alpha")).toEqual([pool]);
+    expect((await models()).data.map((entry) => entry.id)).toEqual([pool.virtualModel]);
+    expect(await (await request(pool.virtualModel)).json()).toMatchObject({ model: "model-one" });
+    write.mockRestore();
+    await config.delete(store, "alpha", pool.id);
+    expect((await request(pool.virtualModel)).status).toBe(404);
+  });
+
+  it("serializes deletion with ownership changes and never starts a listener for stopped deletions", async () => {
+    const { store, config, pool, start, request } = await fixture(backend);
+    await config.save(store, { ...pool, profile: "beta", virtualModel: "virtual/beta" });
+    await start();
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const deleting = new Promise<void>((resolve) => { entered = resolve; });
+    const remove = store.deleteGatewayPool.bind(store);
+    const write = vi.spyOn(store, "deleteGatewayPool").mockImplementationOnce(async (...args) => {
+      entered();
+      await gate;
+      return remove(...args);
+    });
+    const deletion = config.delete(store, "alpha", pool.id);
+    const switching = config.start(store, "beta");
+    try {
+      await deleting;
+      expect(config.status().profileId).toBe("alpha");
+      expect((await request(pool.virtualModel)).status).toBe(200);
+    } finally {
+      release();
+    }
+    await Promise.all([deletion, switching]);
+    write.mockRestore();
+    expect(config.status().profileId).toBe("beta");
+    expect((await request(pool.virtualModel)).status).toBe(404);
+    expect(await (await request("virtual/beta")).json()).toMatchObject({ model: "model-one", owner: "beta-original" });
+    await config.stop("beta");
+    await config.delete(store, "beta", pool.id);
+    await expect(config.start(store, "beta")).rejects.toThrow(/no enabled gateway pools/i);
+    expect(config.status().running).toBe(false);
   });
 });

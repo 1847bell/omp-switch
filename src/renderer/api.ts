@@ -353,6 +353,7 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       gatewayPools.set(pool.profile, pools);
       return structuredClone(pool);
     },
+    deleteGatewayPool: async (profileId, poolId) => { gatewayPools.get(profileId)?.delete(poolId); },
     gatewayStatus: async (profileId) => ({ running: runningGateway !== null, profileId: runningGateway?.profile ?? null, port: runningGateway?.port ?? null, upstreams: [], token: runningGateway?.profile === profileId ? runningGateway.token : undefined }),
     gatewayHealth: async (_profileId, _poolId) => ({}),
     probeGatewayUpstream: async (_profileId, _poolId, _upstreamId, _timeoutMs) => ({ ok: true, status: 200, latencyMs: 115 }),

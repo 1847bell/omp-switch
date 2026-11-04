@@ -123,6 +123,7 @@ export class MetadataStore {
   private fallback: MetadataState = emptyState();
   private hasFts = false;
   private fallbackWrites: Promise<void> = Promise.resolve();
+  private readonly gatewayPoolRevisions = new Map<string, Map<string, number>>();
 
   constructor(userDataDir: string, options: MetadataStoreOptions = {}) {
     this.filePath = path.join(userDataDir, "metadata.sqlite");
@@ -365,6 +366,46 @@ export class MetadataStore {
     await this.persistFallback();
   }
 
+  getGatewayPoolRevision(profile: string, poolId: string): number {
+    return this.gatewayPoolRevisions.get(profile)?.get(poolId) ?? 0;
+  }
+
+  async deleteGatewayPool(profile: string, poolId: string): Promise<boolean> {
+    const revision = this.getGatewayPoolRevision(profile, poolId);
+    const revisions = this.gatewayPoolRevisions.get(profile) ?? new Map<string, number>();
+    this.gatewayPoolRevisions.set(profile, revisions);
+    if (this.sqlite) {
+      const db = this.sqlite;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const existed = Boolean(db.prepare("SELECT id FROM gateway_pools WHERE profile = ? AND id = ?").get(profile, poolId));
+        db.prepare("DELETE FROM gateway_pools WHERE profile = ? AND id = ?").run(profile, poolId);
+        db.prepare("DELETE FROM gateway_probe_history WHERE profile = ? AND pool_id = ?").run(profile, poolId);
+        db.exec("COMMIT");
+        revisions.set(poolId, revision + 1);
+        return existed;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    const matchesPool = (item: GatewayPool): boolean => item.profile === profile && item.id === poolId;
+    const pools = this.fallback.gatewayPools.filter(matchesPool);
+    const poolIndex = this.fallback.gatewayPools.findIndex(matchesPool);
+    const history = this.fallback.gatewayProbeHistory.filter((item) => item.profile === profile && item.poolId === poolId);
+    this.fallback.gatewayPools = this.fallback.gatewayPools.filter((item) => !matchesPool(item));
+    this.fallback.gatewayProbeHistory = this.fallback.gatewayProbeHistory.filter((item) => item.profile !== profile || item.poolId !== poolId);
+    revisions.set(poolId, revision + 1);
+    await this.persistFallback(() => {
+      // Restore only this deletion's data; other pending writes must survive a failed replacement.
+      if (!this.fallback.gatewayPools.some(matchesPool)) this.fallback.gatewayPools.splice(poolIndex, 0, ...pools);
+      const ids = new Set(this.fallback.gatewayProbeHistory.map((item) => item.id));
+      this.fallback.gatewayProbeHistory.push(...history.filter((item) => !ids.has(item.id)));
+      if (revisions.get(poolId) === revision + 1) revisions.set(poolId, revision);
+    });
+    return pools.length > 0;
+  }
+
   listGatewayPools(profile?: string): GatewayPool[] {
     if (this.sqlite) {
       const query = profile ? "SELECT payload FROM gateway_pools WHERE profile = ?" : "SELECT payload FROM gateway_pools";
@@ -374,7 +415,14 @@ export class MetadataStore {
     return this.fallback.gatewayPools.filter((pool) => !profile || pool.profile === profile);
   }
 
-  async recordGatewayProbe(record: GatewayProbeRecord): Promise<void> {
+  async recordGatewayProbe(record: GatewayProbeRecord, expectedRevision?: number): Promise<void> {
+    if (expectedRevision !== undefined) {
+      if (this.getGatewayPoolRevision(record.profile, record.poolId) !== expectedRevision) return;
+      const exists = this.sqlite
+        ? this.sqlite.prepare("SELECT 1 FROM gateway_pools WHERE profile = ? AND id = ?").get(record.profile, record.poolId)
+        : this.fallback.gatewayPools.some((pool) => pool.profile === record.profile && pool.id === record.poolId);
+      if (!exists) return;
+    }
     const id = record.id || randomUUID();
     const item: GatewayProbeRecord = { ...record, id };
     if (this.sqlite) {
@@ -610,14 +658,17 @@ export class MetadataStore {
     return this.fallback.preferences[key] as T | undefined;
   }
 
-  private persistFallback(): Promise<void> {
+  private persistFallback(rollback?: () => void): Promise<void> {
     const write = this.fallbackWrites.then(async () => {
       const target = this.filePath + ".json";
-      await fs.mkdir(path.dirname(target), { recursive: true });
       const temporary = target + "." + randomUUID() + ".tmp";
       try {
+        await fs.mkdir(path.dirname(target), { recursive: true });
         await fs.writeFile(temporary, JSON.stringify(this.fallback, null, 2), "utf8");
         await fs.rename(temporary, target);
+      } catch (error) {
+        rollback?.();
+        throw error;
       } finally {
         await fs.rm(temporary, { force: true }).catch(() => undefined);
       }

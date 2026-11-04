@@ -481,6 +481,7 @@ function registerIpc(): void {
     safeSessionProfileId(pool.profile);
     return gatewayConfig.save(metadata, pool);
   });
+  ipcMain.handle("gateway:delete", (_event, profileId: string, poolId: string) => gatewayConfig.delete(metadata, safeSessionProfileId(profileId), poolId));
   ipcMain.handle("gateway:status", (_event, profileId: string) => gatewayConfig.status(safeSessionProfileId(profileId)));
   ipcMain.handle("gateway:health", (_event, profileId: string, poolId?: string) => metadata.getGatewayHealth(safeSessionProfileId(profileId), poolId));
   ipcMain.handle("gateway:probe", async (_event, profile: string, poolId: string, upstreamId: string, timeoutMs?: number) => {
@@ -490,6 +491,7 @@ function registerIpc(): void {
     if (!pool) throw new Error("Unknown gateway pool");
     const upstream = pool.upstreams.find((candidate) => candidate.id === upstreamId);
     if (!upstream) throw new Error("Unknown gateway upstream");
+    const revision = metadata.getGatewayPoolRevision(profileId, poolId);
     const forwarder = await resolveGatewayForwarder(profileId);
     const result = await probeGatewayUpstream(upstream, forwarder, { timeoutMs });
     await metadata.recordGatewayProbe({
@@ -501,7 +503,7 @@ function registerIpc(): void {
       status: result.status,
       latencyMs: result.latencyMs,
       error: result.error,
-    });
+    }, revision);
     return result;
   });
 

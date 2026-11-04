@@ -407,8 +407,21 @@ export class GatewayServer {
     private readonly options: GatewayServerOptions = {},
   ) {}
 
-  setPools(pools: GatewayPool[]): void {
+  setPools(pools: GatewayPool[], forwarder = this.forwarder): void {
+    const stats = new Map<string, GatewayUpstreamStat>();
+    for (const pool of pools) {
+      if (!pool.enabled) continue;
+      for (const upstream of pool.upstreams) {
+        if (!upstream.enabled) continue;
+        const key = `${pool.id}:${upstream.id}`;
+        const previous = this.stats.get(key);
+        if (previous) stats.set(key, previous);
+      }
+    }
     this.pools = pools;
+    this.forwarder = forwarder;
+    // Requests admitted before this update retain their old map, never resurrecting removed stats.
+    this.stats = stats;
   }
 
   setConfiguration(pools: GatewayPool[], forwarder: GatewayForwarder, token = this.options.token): void {

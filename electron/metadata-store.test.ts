@@ -260,6 +260,174 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
     expect(reopened.listGatewayPools()).toHaveLength(2);
   });
 
+  it("deletes only the selected Profile's pool and health while preserving listener and unrelated data on reopen", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.saveGatewayPool(pool("same"));
+    await store.saveGatewayPool(pool("same", "work"));
+    await store.saveGatewayPool(pool("other"));
+    await store.setGatewayListenerPort("default", 47001);
+    await store.setProviderLabel("openai", "Preserved");
+    await store.setPreference("unrelated", { retained: true });
+    await store.addSnapshot({ id: "preserved", profile: "default", createdAt: "2026-11-04T00:00:00Z" });
+    await store.replaceSessionCaches("default", [sessionCache("preserved")]);
+    const probe = { upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, status: 200, latencyMs: 12 };
+    await store.recordGatewayProbe({ ...probe, profile: "default", poolId: "same" });
+    await store.recordGatewayProbe({ ...probe, profile: "work", poolId: "same" });
+    await store.recordGatewayProbe({ ...probe, profile: "default", poolId: "other" });
+    expect(store.getGatewayHealth("default", "same")["same:one"]).toBeDefined();
+    await expect(store.deleteGatewayPool("default", "same")).resolves.toBe(true);
+    expect(store.getGatewayPoolRevision("default", "same")).toBe(1);
+    expect(store.getGatewayPoolRevision("work", "same")).toBe(0);
+    expect(store.getGatewayPoolRevision("default", "other")).toBe(0);
+    expect(store.listGatewayProbeHistory("default", "same")).toEqual([]);
+    expect(store.getGatewayHealth("default", "same")).toEqual({});
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayPools("default")).toEqual([pool("other")]);
+    expect(reopened.listGatewayPools("work")).toEqual([pool("same", "work")]);
+    expect(reopened.getGatewayHealth("default", "same")).toEqual({});
+    expect(reopened.listGatewayProbeHistory("default", "same")).toEqual([]);
+    expect(reopened.listGatewayProbeHistory("work", "same")).toHaveLength(1);
+    expect(reopened.listGatewayProbeHistory("default", "other")).toHaveLength(1);
+    expect(reopened.getGatewayListenerSettings("default")).toEqual({ port: 47001, conflictingPorts: [] });
+    expect(reopened.getProviderLabels()).toEqual({ openai: "Preserved" });
+    expect(reopened.getPreference("unrelated")).toEqual({ retained: true });
+    expect(reopened.listSnapshots("default")).toHaveLength(1);
+    expect(reopened.getSessionCache("default", "preserved")).toBeDefined();
+    await expect(reopened.deleteGatewayPool("default", "other")).resolves.toBe(true);
+    expect(reopened.listGatewayPools("default")).toEqual([]);
+    expect(reopened.getGatewayListenerSettings("default").port).toBe(47001);
+  });
+
+  it("rejects stale guarded observations after deletion and same-ID recreation but accepts the current revision", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.saveGatewayPool(pool("same"));
+    await store.saveGatewayPool(pool("same", "work"));
+    const revision = store.getGatewayPoolRevision("default", "same");
+    const observation = { profile: "default", poolId: "same", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, latencyMs: 12 };
+    await store.recordGatewayProbe({ ...observation, id: "before" }, revision);
+    await store.deleteGatewayPool("default", "same");
+    await store.recordGatewayProbe({ ...observation, id: "deleted-old" }, revision);
+    await store.recordGatewayProbe({ ...observation, id: "deleted-current" }, store.getGatewayPoolRevision("default", "same"));
+    expect(store.listGatewayProbeHistory("default", "same")).toEqual([]);
+    await store.saveGatewayPool(pool("same"));
+    await store.recordGatewayProbe({ ...observation, id: "recreated-old" }, revision);
+    expect(store.getGatewayHealth("default", "same")).toEqual({});
+    await store.recordGatewayProbe({ ...observation, id: "current" }, store.getGatewayPoolRevision("default", "same"));
+    await store.recordGatewayProbe({ ...observation, profile: "work", id: "work-current" }, revision);
+    expect(store.listGatewayProbeHistory("default", "same").map((item) => item.id)).toEqual(["current"]);
+    expect(store.listGatewayProbeHistory("work", "same").map((item) => item.id)).toEqual(["work-current"]);
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayProbeHistory("default", "same").map((item) => item.id)).toEqual(["current"]);
+    expect(reopened.getGatewayPoolRevision("default", "same")).toBe(0);
+  });
+
+  it("idempotently clears orphan history without touching another Profile", async () => {
+    const { root, store } = await makeStore(backend);
+    const observation = { poolId: "orphan", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: false, latencyMs: 12 };
+    await store.recordGatewayProbe({ ...observation, profile: "default" });
+    await store.recordGatewayProbe({ ...observation, profile: "work" });
+    await expect(store.deleteGatewayPool("default", "orphan")).resolves.toBe(false);
+    await expect(store.deleteGatewayPool("default", "orphan")).resolves.toBe(false);
+    expect(store.getGatewayPoolRevision("default", "orphan")).toBe(2);
+    expect(store.getGatewayHealth("default", "orphan")).toEqual({});
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayProbeHistory("default", "orphan")).toEqual([]);
+    expect(reopened.listGatewayProbeHistory("work", "orphan")).toHaveLength(1);
+  });
+
+  it("restores routing input, history, settings and revision when deletion persistence fails", async () => {
+    const { root, store } = await makeStore(backend);
+    const target = pool("same");
+    await store.saveGatewayPool(target);
+    await store.saveGatewayPool(pool("same", "work"));
+    await store.setGatewayListenerPort("default", 47001);
+    const observation = { id: "preserved", profile: "default", poolId: "same", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, latencyMs: 12 };
+    await store.recordGatewayProbe(observation);
+    const database = backend === "auto" ? new SqliteDatabaseSync(path.join(root, "metadata.sqlite")) : undefined;
+    const rename = backend === "json" ? vi.spyOn(fs, "rename").mockRejectedValueOnce(new Error("delete blocked")) : undefined;
+    try {
+      database?.exec("CREATE TRIGGER reject_gateway_history_delete BEFORE DELETE ON gateway_probe_history BEGIN SELECT RAISE(ABORT, 'delete blocked'); END;");
+      await expect(store.deleteGatewayPool("default", "same")).rejects.toThrow("delete blocked");
+    } finally {
+      rename?.mockRestore();
+      database?.exec("DROP TRIGGER IF EXISTS reject_gateway_history_delete");
+      database?.close();
+    }
+    expect(store.listGatewayPools("default")).toEqual([target]);
+    expect(store.listGatewayPools("work")).toEqual([pool("same", "work")]);
+    expect(store.listGatewayProbeHistory("default", "same")).toEqual([observation]);
+    expect(store.getGatewayHealth("default", "same")["same:one"]).toBeDefined();
+    expect(store.getGatewayListenerSettings("default").port).toBe(47001);
+    expect(store.getGatewayPoolRevision("default", "same")).toBe(0);
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayPools("default")).toEqual([target]);
+    expect(reopened.listGatewayProbeHistory("default", "same")).toEqual([observation]);
+    expect(reopened.getGatewayListenerSettings("default").port).toBe(47001);
+    await reopened.recordGatewayProbe({ ...observation, id: "after-failure" }, 0);
+    expect(reopened.listGatewayProbeHistory("default", "same")).toHaveLength(2);
+  });
+
+  if (backend === "json") it("preserves concurrent unrelated JSON updates when deletion replacement fails", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.saveGatewayPool(pool("target"));
+    await store.setGatewayListenerPort("default", 47001);
+    const observation = { id: "original", profile: "default", poolId: "target", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, latencyMs: 12 };
+    await store.recordGatewayProbe(observation);
+    const originalFile = await fs.readFile(path.join(root, "metadata.sqlite.json"), "utf8");
+    let entered!: () => void;
+    let release!: () => void;
+    const replacing = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const rename = vi.spyOn(fs, "rename").mockImplementationOnce(async () => {
+      entered();
+      await blocked;
+      throw new Error("delete blocked");
+    });
+    try {
+      const deletion = expect(store.deleteGatewayPool("default", "target")).rejects.toThrow("delete blocked");
+      await replacing;
+      expect(await fs.readFile(path.join(root, "metadata.sqlite.json"), "utf8")).toBe(originalFile);
+      const updates = [
+        store.saveGatewayPool(pool("other", "work")),
+        store.recordGatewayProbe({ ...observation, id: "unrelated", profile: "work", poolId: "other" }),
+        store.setGatewayListenerPort("work", 47002),
+        store.setPreference("unrelated", { updated: true }),
+        store.setProviderLabel("openai", "Updated during deletion"),
+      ];
+      release();
+      await deletion;
+      await Promise.all(updates);
+    } finally {
+      release();
+      rename.mockRestore();
+    }
+    expect(store.getGatewayPoolRevision("default", "target")).toBe(0);
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayPools("default")).toEqual([pool("target")]);
+    expect(reopened.listGatewayProbeHistory("default", "target")).toEqual([observation]);
+    expect(reopened.listGatewayPools("work")).toEqual([pool("other", "work")]);
+    expect(reopened.listGatewayProbeHistory("work", "other").map((item) => item.id)).toEqual(["unrelated"]);
+    expect(reopened.getGatewayListenerSettings("default").port).toBe(47001);
+    expect(reopened.getGatewayListenerSettings("work").port).toBe(47002);
+    expect(reopened.getPreference("unrelated")).toEqual({ updated: true });
+    expect(reopened.getProviderLabels()).toEqual({ openai: "Updated during deletion" });
+  });
+
   it("scopes history, health and retention to the profile", async () => {
     const { root, store } = await makeStore(backend);
     const probe = { poolId: "shared", upstreamId: "one", timestamp: "2026-08-24T00:00:00.000Z", ok: false, latencyMs: 10 };

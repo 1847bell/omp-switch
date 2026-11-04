@@ -353,7 +353,7 @@ describe("gateway saved-configuration probes", () => {
     await view.selectPool();
     expect(button(view.container, "gateway.probeAll").disabled).toBe(true);
     expect(view.container.textContent).toContain(i18n.t("gateway.probeNoneEnabled"));
-    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(true);
   });
 });
 
@@ -566,5 +566,160 @@ describe("gateway Profile listener settings", () => {
     expect(portInput(view.container).disabled).toBe(false);
     await view.render("work");
     expect(portInput(view.container).value).toBe("49123");
+  });
+});
+
+describe("gateway pool deletion", () => {
+  const dialogAction = async (key: string) => {
+    const dialog = document.querySelector<HTMLElement>("[role='dialog']")!;
+    const button = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === i18n.t(key))!;
+    await act(async () => { button.click(); });
+  };
+
+  it("cancels without discarding the edited saved pool", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    await view.editModel("omp-switch/unsaved");
+    await view.click("gateway.deletePool", "default");
+    await dialogAction("common.cancel");
+    expect(document.querySelector("[role='dialog']")).toBeNull();
+    expect(view.model()).toBe("omp-switch/unsaved");
+    expect(await api.listGatewayPools("default")).toEqual([pool("default")]);
+    expect(view.notices).toEqual([]);
+  });
+
+  it("deletes only the selected saved pool, retaining other pools and shared credentials", async () => {
+    const api = createMockApi();
+    const other = { ...pool("default"), id: "other", virtualModel: "omp-switch/other" };
+    await api.saveGatewayPool(pool("default"));
+    await api.saveGatewayPool(other);
+    await api.saveGatewayPool(pool("work"));
+    const credentials = new Map([["test", "shared-secret"]]);
+    api.secretStatus = async (id) => ({ exists: credentials.has(id), label: "Shared", masked: "••••" });
+    api.secretDelete = async (id) => ({ deleted: credentials.delete(id), references: [] });
+    const view = await mount(api);
+    await view.selectPool();
+    await view.click("gateway.deletePool", "default");
+    await dialogAction("gateway.deletePool");
+    expect(await api.listGatewayPools("default")).toEqual([other]);
+    expect(await api.listGatewayPools("work")).toEqual([pool("work")]);
+    expect((await api.secretStatus("test")).exists).toBe(true);
+    expect(credentials.get("test")).toBe("shared-secret");
+    expect(view.model()).toBeUndefined();
+    expect(view.container.querySelectorAll(".module-list-row")).toHaveLength(1);
+    await view.selectPool();
+    expect(view.model()).toBe("omp-switch/other");
+  });
+
+  it("leaves the last-pool listener running and keeps its independent port until explicitly stopped", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    await api.setGatewayPort("default", 49123);
+    await api.startGateway("default");
+    const view = await mount(api);
+    await view.selectPool();
+    await view.click("gateway.deletePool", "default");
+    await dialogAction("gateway.deletePool");
+    expect(view.container.textContent).toContain(i18n.t("gateway.empty"));
+    expect(view.container.querySelector(".gateway-editor")).toBeNull();
+    expect(await api.listGatewayPools("default")).toEqual([]);
+    expect(await api.gatewayStatus("default")).toMatchObject({ running: true, profileId: "default", port: 49123, upstreams: [] });
+    expect(await api.gatewayHealth("default")).toEqual({});
+    expect(view.container.querySelector<HTMLInputElement>("input[name='listenerPort']")?.value).toBe("49123");
+    await view.click("gateway.stop", "default");
+    expect((await api.gatewayStatus("default")).running).toBe(false);
+    expect((await api.gatewayListenerSettings("default")).port).toBe(49123);
+  });
+
+  it("preserves the draft and saved pool when deletion fails and never reports success", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    api.deleteGatewayPool = async () => { throw new Error("Delete persistence failed"); };
+    const view = await mount(api);
+    await view.selectPool();
+    await view.editModel("omp-switch/keep-draft");
+    await view.click("gateway.deletePool", "default");
+    await dialogAction("gateway.deletePool");
+    expect(view.model()).toBe("omp-switch/keep-draft");
+    expect(await api.listGatewayPools("default")).toEqual([pool("default")]);
+    expect(view.notices).toEqual([{ tone: "error", text: "Delete persistence failed" }]);
+    await dialogAction("common.cancel");
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].virtualModel).toBe("omp-switch/keep-draft");
+  });
+
+  it("binds a delayed deletion to its captured Profile without clearing the new Profile draft", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    await api.saveGatewayPool(pool("work"));
+    const remove = api.deleteGatewayPool;
+    const gate = new EventEmitter();
+    api.deleteGatewayPool = async (profile, id) => { await once(gate, "finish"); await remove(profile, id); };
+    const view = await mount(api);
+    await view.selectPool();
+    await view.click("gateway.deletePool", "default");
+    await dialogAction("gateway.deletePool");
+    expect([...view.container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === i18n.t("common.save"))?.disabled).toBe(true);
+    await view.render("work");
+    await view.selectPool();
+    await view.editModel("omp-switch/work-draft");
+    await act(async () => { gate.emit("finish"); });
+    expect(view.model()).toBe("omp-switch/work-draft");
+    expect(await api.listGatewayPools("default")).toEqual([]);
+    expect(await api.listGatewayPools("work")).toEqual([pool("work")]);
+    await view.save();
+    expect((await api.listGatewayPools("work"))[0].virtualModel).toBe("omp-switch/work-draft");
+  });
+});
+
+describe("gateway upstream enabled draft", () => {
+  const toggle = async (container: HTMLElement, index: number) => {
+    const input = container.querySelector<HTMLInputElement>(`input[name='upstreams.${index}.enabled']`)!;
+    input.focus();
+    await act(async () => { input.click(); });
+    expect(document.activeElement).toBe(input);
+    return input;
+  };
+  const probeButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>(`button[aria-label='${i18n.t("gateway.probeUpstream")}']`)];
+
+  it("keeps stable row identity and persists an all-disabled draft only on save, then applies a re-enabled draft on Start", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    const input = await toggle(view.container, 0);
+    expect(input.checked).toBe(false);
+    expect(input.parentElement?.textContent).toContain(i18n.t("gateway.disabled"));
+    expect((await api.listGatewayPools("default"))[0].upstreams[0].enabled).toBe(true);
+    expect(probeButtons(view.container)[0].disabled).toBe(true);
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[0]).toMatchObject({ id: "one", enabled: false });
+    expect(probeButtons(view.container)[0].disabled).toBe(true);
+    const batch = view.container.querySelector<HTMLButtonElement>(`button[title='${i18n.t("gateway.probeAll")}']`)!;
+    expect(batch.disabled).toBe(true);
+    expect(view.container.textContent).toContain(i18n.t("gateway.probeNoneEnabled"));
+    await view.click("gateway.start", "default");
+    expect((await api.gatewayStatus("default")).running).toBe(true);
+    await toggle(view.container, 0);
+    expect((await api.listGatewayPools("default"))[0].upstreams[0].enabled).toBe(false);
+    await view.click("gateway.start", "default");
+    expect((await api.listGatewayPools("default"))[0].upstreams[0]).toMatchObject({ id: "one", enabled: true });
+    expect(probeButtons(view.container)[0].disabled).toBe(false);
+  });
+
+  it("disables a saved disabled upstream's single probe and excludes it from batch results", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams.push({ ...saved.upstreams[0], id: "two", enabled: false });
+    await api.saveGatewayPool(saved);
+    api.probeGatewayUpstream = async (_profile, _pool, id) => { if (id === "two") throw new Error("Disabled upstream was probed"); return { ok: true, status: 200, latencyMs: 29 }; };
+    const view = await mount(api);
+    await view.selectPool();
+    expect(probeButtons(view.container).map((button) => button.disabled)).toEqual([false, true]);
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(`button[title='${i18n.t("gateway.probeAll")}']`)!.click(); });
+    expect(view.notices).toContainEqual({ tone: "success", text: i18n.t("gateway.probeAllFinished", { pool: "shared", count: 1, ok: 1, failed: 0 }) });
+    expect([...view.container.querySelectorAll(".health-badge")].map((badge) => badge.textContent)).toEqual(["29ms", i18n.t("gateway.untested")]);
   });
 });

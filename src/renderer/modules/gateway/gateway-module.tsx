@@ -21,6 +21,7 @@ import type {
 } from "@omp-switch/core";
 import { ModelPicker } from "../../components/model-picker";
 import { IconButton, StyledSelect, Tip } from "../../components/ui-primitives";
+import { ConfirmDialog } from "../../components/save-flow";
 import { useTranslation } from "react-i18next";
 import { formatDateTime, formatClock } from "../../locale";
 
@@ -66,6 +67,8 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
 
   const [loading, setLoading] = useState(false);
   const [probingAll, setProbingAll] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ profile: string; id: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const modelOptions = useMemo(() => providers.flatMap(([providerId, provider]) => (Array.isArray(provider.models) ? provider.models : []).map((model) => ({ providerId, modelId: model.id, label: `${providerId}/${model.id}` }))), [providers]);
   const savedPool = pools.find((pool) => pool.id === draft?.id);
   const draftVersion = useMemo(() => JSON.stringify(draft), [draft]);
@@ -182,6 +185,27 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     }
   }
 
+  async function deletePool(): Promise<void> {
+    if (!deleteTarget || deleting || loading || isProbing || readOnly) return;
+    const target = deleteTarget;
+    setDeleting(true);
+    try {
+      await api.deleteGatewayPool(target.profile, target.id);
+      setPools((current) => current.filter((pool) => pool.id !== target.id));
+      setDraft((current) => current?.profile === target.profile && current.id === target.id ? null : current);
+      setHealthMap((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${target.id}:`))));
+      setProbeRun(null);
+      setStatus((current) => ({ ...current, upstreams: current.upstreams.filter((stat) => stat.poolId !== target.id) }));
+      setDeleteTarget(null);
+      onNotice({ tone: "success", text: t("gateway.poolDeleted", { profile: target.profile, pool: target.id }) });
+      await refreshStatus();
+    } catch (error) {
+      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   async function start(): Promise<void> {
     if (readOnly) return onNotice({ tone: "error", text: t("gateway.readonly") });
     if (!portSaved) return onNotice({ tone: "info", text: t("gateway.portSaveFirst") });
@@ -230,7 +254,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   async function testProbe(upstream: GatewayUpstream): Promise<void> {
-    if (isProbing) return;
+    if (isProbing || deleting || !upstream.enabled) return;
     if (!savedPool || !canProbe) return onNotice({ tone: "info", text: t("gateway.probeSaveFirst") });
     const pool = savedPool;
     setProbingUpstreamId(upstream.id);
@@ -250,7 +274,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   async function probeAll(): Promise<void> {
-    if (isProbing) return;
+    if (isProbing || deleting) return;
     if (!savedPool || !canProbe) return onNotice({ tone: "info", text: t("gateway.probeSaveFirst") });
     const pool = savedPool;
     const targets = pool.upstreams.filter((upstream) => upstream.enabled);
@@ -307,11 +331,11 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
             {status.running ? t("gateway.running", { profile: status.profileId, port: status.port }) : t("gateway.stoppedBadge")}
           </span>
           {status.running ? (
-            <button className="secondary-button" onClick={() => void stop()} disabled={loading}>
+            <button className="secondary-button" onClick={() => void stop()} disabled={loading || deleting || isProbing}>
               <Square size={14} />{t("gateway.stop", { profile: status.profileId })}
             </button>
           ) : null}
-          <IconButton label={t("common.refresh")} onClick={() => void refresh()} disabled={loading}>
+          <IconButton label={t("common.refresh")} onClick={() => void refresh()} disabled={loading || deleting || isProbing}>
             <RefreshCw size={16} className={loading ? "spin" : ""} />
           </IconButton>
           {pools.length > 0 ? (
@@ -326,7 +350,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
           <span>{t("gateway.profilePort", { profile: profileId })}</span>
           <input name="listenerPort" inputMode="numeric" value={portInput} onChange={(event) => setPortInput(event.target.value)} disabled={loading || readOnly || portLocked || listenerSettings === null} aria-describedby="gateway-port-hint" aria-invalid={portInput !== "" && !validPort} />
         </label>
-        <button className="secondary-button" onClick={() => void savePort()} disabled={loading || readOnly || portLocked || !validPort || portSaved || listenerSettings === null}>
+        <button className="secondary-button" onClick={() => void savePort()} disabled={loading || deleting || readOnly || portLocked || !validPort || portSaved || listenerSettings === null}>
           <Save size={15} />{t("gateway.savePort")}
         </button>
         <p id="gateway-port-hint" className="muted-line" aria-live="polite">
@@ -378,6 +402,9 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                   <strong>{draft.id}</strong>
                 </div>
                 <div className="drawer-actions">
+                  {savedPool ? <button className="secondary-button danger" onClick={() => setDeleteTarget({ profile: profileId, id: savedPool.id })} disabled={loading || deleting || isProbing || readOnly}>
+                    <Trash2 size={14} />{t("gateway.deletePool")}
+                  </button> : null}
                   <button className="secondary-button" onClick={() => setDraft(null)}>{t("common.close")}</button>
                 </div>
               </div>
@@ -402,7 +429,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                       className="secondary-button compact"
                       title={t("gateway.probeAll")}
                       onClick={() => void probeAll()}
-                      disabled={loading || isProbing || !canProbe || !draft.upstreams.some((upstream) => upstream.enabled)}
+                      disabled={loading || deleting || isProbing || !canProbe || !draft.upstreams.some((upstream) => upstream.enabled)}
                     >
                       <Activity size={13} className={probingAll ? "spin" : ""} />
                       <span>{t("gateway.probeAll")}</span>
@@ -437,6 +464,10 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                         </IconButton>
                       </div>
                       <div className="upstream-fields">
+                      <label className="check-line module-check">
+                        <input name={`upstreams.${index}.enabled`} type="checkbox" aria-label={t("gateway.upstreamEnabled")} checked={upstream.enabled} onChange={(event) => updateUpstream(index, { enabled: event.target.checked })} />
+                        {t(upstream.enabled ? "gateway.enabled" : "gateway.disabled")}
+                      </label>
                       <input name={`upstreams.${index}.id`} value={upstream.id} onChange={(event) => updateUpstream(index, { id: event.target.value })} aria-label={t("gateway.ariaUpstreamId")} />
                       <ModelPicker
                         providers={providers}
@@ -469,7 +500,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                         variant="subtle"
                         label={t("gateway.probeUpstream")}
                         onClick={() => void testProbe(upstream)}
-                        disabled={loading || isProbing || !canProbe}
+                        disabled={loading || deleting || isProbing || !canProbe || !upstream.enabled}
                       >
                         <Activity size={14} className={probingUpstreamId === upstream.id ? "spin" : ""} />
                       </IconButton>
@@ -508,7 +539,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                         variant="danger"
                         label={t("gateway.deleteUpstream")}
                         onClick={() => setDraft((current) => current ? { ...current, upstreams: current.upstreams.filter((_, itemIndex) => itemIndex !== index) } : current)}
-                        disabled={draft.upstreams.length <= 1}
+                        disabled={draft.upstreams.length <= 1 || loading || deleting || isProbing || readOnly}
                       >
                         <Trash2 size={14} />
                       </IconButton>
@@ -518,10 +549,10 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                 })}
               </div>
               <div className="drawer-actions">
-                <button className="primary-button" onClick={() => void saveDraft()} disabled={loading || readOnly || isProbing}>
+                <button className="primary-button" onClick={() => void saveDraft()} disabled={loading || deleting || readOnly || isProbing}>
                   <Save size={15} />{t("common.save")}
                 </button>
-                <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly || isProbing || !portSaved}>
+                <button className="secondary-button" onClick={() => void start()} disabled={loading || deleting || readOnly || isProbing || !portSaved}>
                   <Play size={14} />{t(status.running && status.profileId !== profileId ? "gateway.switchProfile" : "gateway.start", { profile: profileId })}
                 </button>
               </div>
@@ -556,6 +587,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
         </div>
       </div>
       )}
+      <ConfirmDialog open={deleteTarget !== null} title={t("gateway.deletePoolTitle", { pool: deleteTarget?.id })} message={t("gateway.deletePoolWarning", { profile: deleteTarget?.profile })} confirmLabel={t("gateway.deletePool")} danger busy={deleting} onClose={() => { if (!deleting) setDeleteTarget(null); }} onConfirm={() => void deletePool()} />
     </section>
   );
 }

@@ -53,6 +53,7 @@ const api = {
   setUsagePrice: (key: string, price: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | null) => ipcRenderer.invoke("usage:set-price", key, price),
   listGatewayPools: (profileId: string): Promise<GatewayPool[]> => ipcRenderer.invoke("gateway:list", profileId),
   saveGatewayPool: (pool: GatewayPool): Promise<GatewayPool> => ipcRenderer.invoke("gateway:save", pool),
+  deleteGatewayPool: (profileId: string, poolId: string): Promise<void> => ipcRenderer.invoke("gateway:delete", profileId, poolId),
   gatewayStatus: (profileId: string) => ipcRenderer.invoke("gateway:status", profileId),
   gatewayHealth: (profileId: string, poolId?: string): Promise<Record<string, GatewayUpstreamHealth>> => ipcRenderer.invoke("gateway:health", profileId, poolId),
   probeGatewayUpstream: (profileId: string, poolId: string, upstreamId: string, timeoutMs?: number) => ipcRenderer.invoke("gateway:probe", profileId, poolId, upstreamId, timeoutMs),

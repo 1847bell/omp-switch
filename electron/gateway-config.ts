@@ -6,6 +6,7 @@ interface ActiveGateway {
   profile: string;
   port: number;
   token: string;
+  resolved: GatewayForwarder;
 }
 
 interface GatewayRuntimeDependencies {
@@ -13,7 +14,7 @@ interface GatewayRuntimeDependencies {
   resolveForwarder: (profileId: string) => Promise<GatewayForwarder>;
 }
 
-/** Save, start and stop share one queue so an awaited persistence cannot apply to a later lifecycle. */
+/** Pool and listener changes share one queue so an awaited write cannot apply to a later lifecycle. */
 export class GatewayConfigCoordinator {
   private pending: Promise<unknown> = Promise.resolve();
   private active: ActiveGateway | null = null;
@@ -25,6 +26,36 @@ export class GatewayConfigCoordinator {
     const result = this.pending.then(operation);
     this.pending = result.catch(() => undefined);
     return result;
+  }
+
+  private createForwarder(store: MetadataStore, profileId: string, pools: GatewayPool[], resolved: GatewayForwarder): GatewayForwarder {
+    const revisions = new Map<string, number>();
+    for (const pool of pools) revisions.set(pool.id, store.getGatewayPoolRevision(profileId, pool.id));
+    return {
+      ...resolved,
+      onAttempt: (observation) => {
+        resolved.onAttempt?.(observation);
+        const revision = revisions.get(observation.poolId);
+        if (revision === undefined) return;
+        const write = store.recordGatewayProbe({
+          profile: profileId,
+          poolId: observation.poolId,
+          upstreamId: observation.upstreamId,
+          timestamp: new Date().toISOString(),
+          ok: !observation.error && (observation.status === undefined || observation.status < 400),
+          status: observation.status,
+          latencyMs: observation.latencyMs,
+          error: observation.error,
+        }, revision).catch(() => undefined);
+        this.probeWrites.add(write);
+        void write.then(() => { this.probeWrites.delete(write); });
+      },
+    };
+  }
+
+  private updatePools(store: MetadataStore, active: ActiveGateway): void {
+    const pools = store.listGatewayPools(active.profile).filter((pool) => pool.enabled);
+    active.server.setPools(pools, this.createForwarder(store, active.profile, pools, active.resolved));
   }
 
   status(profileId?: string) {
@@ -60,27 +91,10 @@ export class GatewayConfigCoordinator {
       if (active && port !== active.port) throw new Error("Stop the gateway before changing its port");
       const token = await this.dependencies.loadToken();
       const resolved = await this.dependencies.resolveForwarder(profileId);
-      const forwarder: GatewayForwarder = {
-        ...resolved,
-        onAttempt: (observation) => {
-          resolved.onAttempt?.(observation);
-          const write = store.recordGatewayProbe({
-            profile: profileId,
-            poolId: observation.poolId,
-            upstreamId: observation.upstreamId,
-            timestamp: new Date().toISOString(),
-            ok: !observation.error && (observation.status === undefined || observation.status < 400),
-            status: observation.status,
-            latencyMs: observation.latencyMs,
-            error: observation.error,
-          }).catch(() => undefined);
-          this.probeWrites.add(write);
-          void write.then(() => { this.probeWrites.delete(write); });
-        },
-      };
+      const forwarder = this.createForwarder(store, profileId, pools, resolved);
       if (active) {
         active.server.setConfiguration(pools, forwarder, token);
-        this.active = { ...active, profile: profileId, token };
+        this.active = { ...active, profile: profileId, token, resolved };
         return { running: true, profileId, port, token };
       }
       const server = new GatewayServer(forwarder, pools, { token });
@@ -95,7 +109,7 @@ export class GatewayConfigCoordinator {
         }
         throw error;
       }
-      this.active = { server, profile: profileId, port: boundPort, token };
+      this.active = { server, profile: profileId, port: boundPort, token, resolved };
       return { running: true, profileId, port: boundPort, token };
     });
   }
@@ -117,9 +131,20 @@ export class GatewayConfigCoordinator {
       const active = this.active;
       await store.saveGatewayPool(pool);
       if (active?.server.running && active.profile === pool.profile) {
-        active.server.setPools(store.listGatewayPools(pool.profile).filter((candidate) => candidate.enabled));
+        this.updatePools(store, active);
       }
       return pool;
+    });
+  }
+
+  delete(store: MetadataStore, profileId: string, poolId: string): Promise<void> {
+    return this.runExclusive(async () => {
+      if (typeof profileId !== "string" || typeof poolId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(profileId) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(poolId)) {
+        throw new Error("Invalid gateway pool identifier");
+      }
+      await store.deleteGatewayPool(profileId, poolId);
+      const active = this.active;
+      if (active?.server.running && active.profile === profileId) this.updatePools(store, active);
     });
   }
 }
