@@ -5,12 +5,12 @@
 
 ## 续接上下文
 
-- 当前 G05 修复分支：`fix/gateway-g05`，从 G04 提交 `bb3a094` 创建；G02/G03 为 `0144a8a`，G01 为 `27f475c`。这些修复尚未合并至维护分支，未推送。
+- 当前 G06 修复分支：`fix/gateway-g06`，从 G05 提交 `1847312` 创建；G04 为 `bb3a094`，G02/G03 为 `0144a8a`，G01 为 `27f475c`。这些修复尚未合并至维护分支，未推送。
 - 前序已修复：首次新建网关池后编辑器不可见；无池时左侧空栏；上游控件溢出、错位和窄窗口布局。
 - 前序新建/布局修复及本清单已通过 `0cd838b` 提交，并快进合并至 `fork/maintenance`，未推送。不要覆盖这些工作或其他用户改动。
 - 先前发现 `.codegraph/`、`sync/` 为未跟踪内容，不属于本次修复，不要顺手提交或删除。
 - 本清单记录前序审计，不代表后续代码未变化。文件行号均为审计时位置，修复时以符号及当前源码为准。
-- G01–G04 已提交；G05 已修复并完成真实 HTTP 烟测、专项、类型检查、全量回归及生产构建验证，随本次提交记录。全量仅保留两项既有 Windows 符号链接 `EPERM` 失败；其余未勾选项保持待修复。
+- G01–G05 已提交；G06 已修复并完成真实 HTTP、旧版 Fetch 语义适配器、专项、最终类型检查、全量回归及生产构建验证，随本次提交记录。全量仅保留两项既有 Windows 符号链接 `EPERM` 失败；G07 及其余未勾选项保持待修复。
 
 ## 证据等级
 
@@ -82,10 +82,14 @@
 
 ### G06 压缩响应头与正文不匹配
 
-- [ ] 保证转发的 `Content-Encoding` 与实际正文编码一致。
+- [x] 保证转发的 `Content-Encoding` 与实际正文编码一致。
 - 证据：**直接转发层实测确认**。gzip 上游经 Node fetch 返回的正文已解压，但头仍是 `gzip`；二次 gunzip 得到 `Z_DATA_ERROR`。
 - 位置：`gateway.ts` 的 `RELAYED_RESPONSE_HEADERS`、`copyResponse`（约 25–33、280–283 行）。
 - 验收：G01 修复后，通过真实 HTTP 网关请求 gzip 上游，客户端可正常读取 JSON；普通和流式响应不受影响。
+- 修复前通过真实 HTTP 网关运行新增压缩回归：15 项中 10 项失败、5 项通过。gzip（含别名及大小写）、deflate、Brotli、Zstandard、组合编码的 JSON 和 gzip SSE 因客户端重复解压而失败；直接调用仍携带过期的编码与压缩长度头。
+- 原生 Fetch 边界实测：当前 Node v24.14.0 只在所有编码均受支持时解码整个编码链；未知编码、含未知编码的组合及 `x-deflate` 正文保持原样，修复需保留这类响应的编码信息。
+- 修复：在受控响应体构造边界统一规范化直接调用及 HTTP 返回；仅对 Fetch 已解码的完整编码链移除 `Content-Encoding` 和原压缩 `Content-Length`。不重新压缩、不缓冲完整正文，未解码编码链继续保留元数据。
+- 兼容性补充：上游 [Undici 7.11 发布记录](https://github.com/nodejs/undici/releases/tag/v7.11.0) 与 [实现 PR](https://github.com/nodejs/undici/pull/4238) 确认 Zstd 解码并非早期 Node 24 的固有能力；7.8 源码没有该分支。真实 HTTP 配合旧版 Fetch 语义适配器复现固定编码表会误删 Zstd 元数据，已改为按内置 Undici 版本判断 Zstd 能力，不抬高项目 Node 24 最低版本。
 
 ### G07 探测及故障切换时未释放丢弃的响应体
 
@@ -167,7 +171,8 @@ G01 → G02/G04 → G03/G11 → G05/G06/G07 → G08/G09/G10 → G12。
 | G02 | `0144a8a`；`electron/metadata-store.ts`、`domain.ts`、网关组件、IPC/preload/global/mock 及行为测试 | SQLite/JSON 同名池、旧数据迁移/回滚、永久隔离未知健康记录、重开及 UI 异步切换回归通过；浏览器预览确认同名池往返切换、旧草稿/Token 隔离 | 旧记录无法确定的归属不猜测，保留但不显示于任一有效 Profile |
 | G03 | `0144a8a`；`electron/gateway-config.ts`、`electron/main.ts`、网关保存说明及真实 HTTP 测试 | 两个后端通过生产保存入口的真实 HTTP 路由变更、启停、其他 Profile 隔离、端口拒绝、并发保存/启动/停止回归与独立烟测 | 活动端口变化仍须先停止（G11）；跨 Profile 同端口切换已由 G04 完成 |
 | G04 | `bb3a094`；`electron/gateway-config.ts`、`main.ts`、核心网关、元数据持久化、IPC/preload/global/mock、网关组件、双语文案及行为测试 | 专项 81 项通过；SQLite/JSON 独立真实 HTTP 确认同 ID 的 A→B→A URL/凭据/请求头隔离、旧请求 503 故障切换归属、当前统计隔离、失败保留旧服务、过期停止拒绝、同 Profile resolver 更新及初次绑定失败不占归属；浏览器确认活动 Profile/停止对象/同端口切换 | 不同端口仍需先停止（G11）；其他未勾选项保持待修复 |
-| G05 | `packages/core/src/gateway.ts`、`gateway-response.test.ts`、双语功能文档及变更日志 | 专项 49 项通过，新增 9 项覆盖响应头后/首帧后取消、首字节前/后停滞、Chat/Responses 半途断流、直接取消响应体、上游正文错误与长流；独立 Node 真实 HTTP 确认完整 SSE/DONE、取消/超时关闭上游、无故障切换或第二次响应；生产构建通过 | G06 压缩头及 G07 被丢弃响应的释放仍未处理 |
+| G05 | `1847312`；`packages/core/src/gateway.ts`、`gateway-response.test.ts`、双语功能文档及变更日志 | 专项 49 项通过，新增 9 项覆盖响应头后/首帧后取消、首字节前/后停滞、Chat/Responses 半途断流、直接取消响应体、上游正文错误与长流；独立 Node 真实 HTTP 确认完整 SSE/DONE、取消/超时关闭上游、无故障切换或第二次响应；生产构建通过 | 压缩头后续由 G06 补齐；G07 被丢弃响应的释放仍未处理 |
+| G06 | `packages/core/src/gateway.ts`、`gateway-response.test.ts`、双语功能文档及变更日志 | 专项 64 项通过，新增 15 项压缩行为回归；最终类型检查及生产构建通过；独立 Node 真实 HTTP 完成普通/压缩 JSON、原始 HTTP 字节及头、直接调用、未知编码保留与 gzip SSE 首帧/DONE；旧版 Fetch 语义适配器确认未解码 Zstd 元数据保留 | G07 探测/重试丢弃响应体释放及其余未勾选项保持待修复 |
 
 ### G02/G03 本轮验证
 
@@ -189,3 +194,12 @@ G01 → G02/G04 → G03/G11 → G05/G06/G07 → G08/G09/G10 → G12。
 - 最终全量测试：**467 通过、5 跳过、2 失败**。失败仍仅是 `packages/core/src/prompt-library.test.ts` 的既有 Windows 符号链接 `EPERM`，未修改或跳过这些测试。
 - 独立 Node 真实 HTTP 烟测验证：直接及 HTTP SSE 在 400ms 空闲期限下持续约 750ms 并完整读到 DONE；直接调用首帧后取消、响应体停滞，以及 HTTP Chat/Responses 停滞均关闭上游。6 次请求全部只命中第一上游，没有正文开始后的故障切换、追加错误响应或未处理异常。
 - 烟测使用进程内脚本和临时回环监听，结束时关闭网关及上游；不读取真实 OMP 配置、不写应用数据、没有持久化烟测脚本，也不涉及 UI 改动。本轮失败测试遗留的四个临时目录已清理；未触碰 `.codegraph/`、`sync/`。
+
+### G06 本轮验证
+
+- 网关专项 **64 项通过**，其中新增压缩回归 **15 项**；最终类型检查及生产构建通过。Zstd 回归以当前原生 Fetch 的真实解码结果为基准，不假定每个 Node 24 版本都支持该算法。
+- 最终全量测试：**482 通过、5 跳过、2 失败**。失败仍仅是 `packages/core/src/prompt-library.test.ts` 的既有 Windows 符号链接 `EPERM`；没有修改或跳过这些测试，已清理本轮失败测试遗留的临时目录。
+- 当前 Node v24.14.0 / Undici 7.21.0 的独立真实 HTTP 烟测完成 11 次请求：普通及 gzip/x-gzip/deflate/Brotli/Zstd/组合编码 JSON 均可读取；原始 HTTP Chat 客户端收到精确明文字节，没有过期的压缩头；直接转发同步规范化编码及长度头；未知编码保持原字节与编码；gzip SSE 在上游 EOF 前交付首帧并完整读到 DONE。
+- 单独的真实 HTTP + 旧版 Fetch 语义适配器烟测先失败后通过：Undici 7.8 语义下的 Zstd 压缩字节、编码及压缩长度均保留。该项没有声称运行了旧版 Node 可执行文件。
+- 普通 SSE、直接取消、空闲超时及 HTTP Chat/Responses 半途断流的独立烟测通过；持续约 750ms 的健康流在 400ms 空闲期限下完整完成，停滞或取消关闭上游，未发生正文开始后的故障切换或第二次响应。
+- 烟测均为进程内脚本与临时回环监听，结束时关闭网关及上游；没有持久化脚本、不读取真实 OMP 配置、不写应用数据、未涉及 UI 改动或触碰 `.codegraph/`、`sync/`。

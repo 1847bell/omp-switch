@@ -16,6 +16,13 @@ export const DEFAULT_GATEWAY_PORT = 46831;
 export const DEFAULT_GATEWAY_UPSTREAM_TIMEOUT_MS = 255_000;
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// Node fetch decodes the entire content-coding chain only if every coding is supported.
+const [undiciMajor, undiciMinor] = (globalThis.process?.versions.undici ?? "0.0").split(".", 2).map(Number);
+// Zstandard decoding was added in Undici 7.11; older Node 24 runtimes leave it encoded.
+const FETCH_DECODED_ENCODINGS: Record<string, boolean> = {
+  gzip: true, "x-gzip": true, deflate: true, br: true,
+  zstd: undiciMajor > 7 || (undiciMajor === 7 && undiciMinor >= 11),
+};
 
 /**
  * Response headers relayed back to the caller. Everything else is dropped: `transfer-encoding`
@@ -84,6 +91,7 @@ export interface ResolvedGatewayUpstream {
 
 export interface GatewayForwarder {
   resolve(upstream: GatewayUpstream): Promise<ResolvedGatewayUpstream>;
+  /** Must follow Node fetch's transparent response-body decompression semantics. */
   fetchImpl?: typeof fetch;
   /** Idle deadline while awaiting headers or more response bytes, not a total stream duration. */
   timeoutMs?: number;
@@ -257,7 +265,13 @@ function managedGatewayResponse(response: Response, signal: AbortSignal, renewTi
     },
     cancel,
   });
-  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  const managed = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+  const encoding = managed.headers.get("content-encoding");
+  if (encoding?.split(",").every((coding) => FETCH_DECODED_ENCODINGS[coding.trim().toLowerCase()] === true)) {
+    managed.headers.delete("content-encoding");
+    managed.headers.delete("content-length");
+  }
+  return managed;
 }
 
 export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayRequest, forwarder: GatewayForwarder): Promise<Response> {

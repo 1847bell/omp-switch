@@ -1,5 +1,6 @@
 import http from "node:http";
 import { once } from "node:events";
+import { brotliCompressSync, constants, createGzip, deflateSync, gzipSync, zstdCompressSync, type Gzip } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayPool } from "./domain";
 import { forwardGatewayRequest, GatewayServer } from "./gateway";
@@ -132,5 +133,124 @@ describe("gateway response lifecycle", () => {
     source.close();
     expect(await reader.read()).toEqual({ done: true, value: undefined });
     reader.releaseLock();
+  });
+});
+
+async function responseGateway(handler: http.RequestListener) {
+  const upstream = http.createServer(handler);
+  upstreams.push(upstream);
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  const address = upstream.address();
+  if (!address || typeof address === "string") throw new Error("Expected loopback TCP server");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const gateway = new GatewayServer({ resolve: async () => ({ baseUrl }) }, [pool], { token: "compression-test-only" });
+  gateways.push(gateway);
+  const port = await gateway.start(0);
+  return { baseUrl, url: `http://127.0.0.1:${port}` };
+}
+
+function compressionRequest(url: string, path = "/v1/responses") {
+  return fetch(`${url}${path}`, {
+    method: "POST", headers: { authorization: "Bearer compression-test-only", "content-type": "application/json" },
+    body: JSON.stringify({ model: pool.virtualModel, stream: true }), signal: AbortSignal.timeout(3000),
+  });
+}
+
+describe("gateway response compression", () => {
+  const expected = { id: "compressed-reply", output: [{ role: "assistant", content: "压缩响应 ✓" }] };
+  const plaintext = Buffer.from(JSON.stringify(expected));
+
+  it.each([
+    { encoding: undefined, encode: (body: Buffer) => body, path: "/v1/chat/completions" },
+    { encoding: "gzip", encode: gzipSync, path: "/v1/chat/completions" },
+    { encoding: "gzip", encode: gzipSync, path: "/v1/responses" },
+    { encoding: "x-gzip", encode: gzipSync, path: "/v1/responses" },
+    { encoding: "GZip", encode: gzipSync, path: "/v1/responses" },
+    { encoding: "deflate", encode: deflateSync, path: "/v1/responses" },
+    { encoding: "br", encode: brotliCompressSync, path: "/v1/responses" },
+    { encoding: "gzip, br", encode: (body: Buffer) => brotliCompressSync(gzipSync(body)), path: "/v1/responses" },
+  ])("serves readable JSON for $encoding on $path", async ({ encoding, encode, path }) => {
+    const encoded = encode(plaintext);
+    const { url } = await responseGateway((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json", "content-length": encoded.length, ...(encoding ? { "content-encoding": encoding } : {}) });
+      response.end(encoded);
+    });
+    const response = await compressionRequest(url, path);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual(expected);
+    expect(response.headers.get("content-encoding")).toBeNull();
+  });
+
+  it("keeps Zstandard bytes and metadata consistent with the native Fetch decoder", async () => {
+    const encoded = zstdCompressSync(plaintext);
+    const { baseUrl, url } = await responseGateway((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json", "content-encoding": "zstd", "content-length": encoded.length });
+      response.end(encoded);
+    });
+    const native = await fetch(baseUrl, { signal: AbortSignal.timeout(3000) });
+    const nativeBytes = Buffer.from(await native.arrayBuffer());
+    const decoded = nativeBytes.equals(plaintext);
+    const response = await compressionRequest(url);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(decoded ? plaintext : encoded);
+    expect(response.headers.get("content-encoding")).toBe(decoded ? null : "zstd");
+  });
+
+  it("normalizes decoded headers for direct callers as well as HTTP clients", async () => {
+    const encoded = gzipSync(plaintext);
+    const { baseUrl } = await responseGateway((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json", "content-encoding": "gzip", "content-length": encoded.length });
+      response.end(encoded);
+    });
+    const response = await forwardGatewayRequest(pool, { path: "/v1/responses", body: {} }, { resolve: async () => ({ baseUrl }) });
+    await expect(response.json()).resolves.toEqual(expected);
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(response.headers.get("content-length")).toBeNull();
+  });
+
+  it.each([
+    { encoding: "x-opaque", encode: gzipSync },
+    { encoding: "gzip, x-opaque", encode: gzipSync },
+    { encoding: "gzip, identity", encode: gzipSync },
+    { encoding: "x-deflate", encode: deflateSync },
+  ])("preserves bytes and encoding for an undecoded $encoding response", async ({ encoding, encode }) => {
+    const encoded = encode(plaintext);
+    const { url } = await responseGateway((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": encoding });
+      response.end(encoded);
+    });
+    const response = await compressionRequest(url);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(encoded);
+    expect(response.headers.get("content-encoding")).toBe(encoding);
+  });
+
+  it("delivers a gzip SSE frame before the upstream ends and then reaches DONE", async () => {
+    let compressor!: Gzip;
+    const { url } = await responseGateway((request, response) => {
+      request.resume();
+      response.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" });
+      compressor = createGzip({ flush: constants.Z_SYNC_FLUSH });
+      response.once("close", () => compressor.destroy());
+      compressor.pipe(response);
+      compressor.write("data: first\n\n");
+    });
+    const response = await compressionRequest(url);
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: first\n\n");
+    compressor.end("data: [DONE]\n\n");
+    const tail: string[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      tail.push(new TextDecoder().decode(value));
+    }
+    reader.releaseLock();
+    expect(tail.join("")).toBe("data: [DONE]\n\n");
+    expect(response.headers.get("content-encoding")).toBeNull();
   });
 });
