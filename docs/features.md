@@ -38,6 +38,7 @@
 - **本地网关**：监听本机回环地址，提供 `/healthz`、`/v1/models`、Chat、Responses，支持流式响应开始前的故障转移。必须带 Bearer token，会校验 Host，拒绝跨源请求。
   - 上游默认空闲期限为 255 秒，收到响应头或正文块后重新计时，而不是限制流的总时长。客户端取消或停滞超时会释放上游连接；选定响应后的正文错误只终止当前流，不再切换上游。
   - 上游压缩的 JSON/SSE 经 Node Fetch 解压后，网关移除已失效的 `Content-Encoding` 和压缩长度头，避免客户端重复解压；未被解码的编码链保留原始正文及编码信息，流式响应不等待正文结束才发送首帧。
+  - 健康探测只需响应头即可返回，不等待正文结束；探测结束及丢弃重试响应时主动终止对应 Fetch 请求，释放未读取或无限正文。最终选定的 JSON/SSE 继续由调用方及流生命周期控制，不会被重试清理提前中断。
 - **凭据与登录**：Windows 的 DPAPI 凭据桥、Linux 的 libsecret / age 凭据库（v0.6.0 起），以及 OMP OAuth 的状态查看和登录入口。孤儿凭据和引用追踪在两个系统上行为一致。
 - **命令行**：稳定的 JSON 输出，命令有 `list`、`get`、`validate`、`plan`、`apply`、`snapshot`、`snapshots`、`restore`；恢复默认检查快照哈希，只有显式 `--force` 才覆盖外部修改。`get --reveal-secrets` 会输出明文凭据，仅在可信本机终端谨慎使用。
 - **终端界面（TUI）**：`omp-switch-tui` 有 providers、角色、快照、诊断四个页面，保存分两步（先看 diff，再确认）；`list`、`validate` 子命令可以直接写进脚本。需要从源码构建，见 [install.md](install.md)。

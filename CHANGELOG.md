@@ -12,6 +12,7 @@
 - JSON metadata commits are serialized so request history cannot race with gateway configuration writes. Gateway stop waits for pending history commits before completing.
 - Gateway cancellation and idle timeouts remain active through response-body consumption. Response headers and body chunks renew the idle deadline, allowing healthy SSE streams to continue; stalled or cancelled streams release the upstream without failover or a second response.
 - Compressed gateway JSON and SSE responses no longer carry stale encoding or compressed-length headers after Node fetch decodes their bodies. Direct forwarding uses the same normalized headers, while unsupported content-coding chains retain their original bytes and encoding metadata.
+- Gateway probes and pre-response retries now cancel abandoned upstream fetches, releasing unread or infinite bodies without relying on garbage collection. The final selected JSON/SSE response retains its own cancellation and timeout lifecycle.
 
 ## 1.0.2 - 2026-11-02
 

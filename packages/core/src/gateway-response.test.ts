@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { brotliCompressSync, constants, createGzip, deflateSync, gzipSync, zstdCompressSync, type Gzip } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayPool } from "./domain";
-import { forwardGatewayRequest, GatewayServer } from "./gateway";
+import { forwardGatewayRequest, GatewayServer, probeGatewayUpstream } from "./gateway";
 
 const pool: GatewayPool = {
   id: "stream", profile: "default", virtualModel: "omp-switch/stream", port: 46831, enabled: true,
@@ -11,11 +11,19 @@ const pool: GatewayPool = {
 };
 const upstreams: http.Server[] = [];
 const gateways: GatewayServer[] = [];
+// Keep native fetch responses reachable so GC cannot accidentally dispose an abandoned body.
+const retainedResponses: Response[] = [];
+const retainingFetch: typeof fetch = async (input, init) => {
+  const response = await fetch(input, init);
+  retainedResponses.push(response);
+  return response;
+};
 afterEach(async () => {
   vi.useRealTimers();
   for (const server of upstreams) server.closeAllConnections();
   for (const gateway of gateways.splice(0)) await gateway.stop();
   for (const server of upstreams.splice(0)) await once(server.close(), "close");
+  retainedResponses.length = 0;
 });
 
 async function streamingUpstream(firstFrame = true) {
@@ -144,7 +152,7 @@ async function responseGateway(handler: http.RequestListener) {
   const address = upstream.address();
   if (!address || typeof address === "string") throw new Error("Expected loopback TCP server");
   const baseUrl = `http://127.0.0.1:${address.port}`;
-  const gateway = new GatewayServer({ resolve: async () => ({ baseUrl }) }, [pool], { token: "compression-test-only" });
+  const gateway = new GatewayServer({ resolve: async () => ({ baseUrl }), fetchImpl: retainingFetch }, [pool], { token: "compression-test-only" });
   gateways.push(gateway);
   const port = await gateway.start(0);
   return { baseUrl, url: `http://127.0.0.1:${port}` };
@@ -252,5 +260,80 @@ describe("gateway response compression", () => {
     reader.releaseLock();
     expect(tail.join("")).toBe("data: [DONE]\n\n");
     expect(response.headers.get("content-encoding")).toBeNull();
+  });
+});
+
+describe("gateway discarded responses", () => {
+  it.each([
+    { status: 200, via: "direct" },
+    { status: 429, via: "http" },
+    { status: 503, via: "direct" },
+  ])("releases infinite bodies after repeated $status probes ($via)", async ({ status, via }) => {
+    const closed: Promise<unknown>[] = [];
+    const { baseUrl, url } = await responseGateway((request, response) => {
+      request.resume();
+      closed.push(once(response, "close", { signal: AbortSignal.timeout(2000) }));
+      response.writeHead(status, { "content-type": "application/json" });
+      response.write('{"unfinished":');
+    });
+    for (let index = 0; index < 3; index++) {
+      const result = via === "direct"
+        ? await probeGatewayUpstream(pool.upstreams[0], { resolve: async () => ({ baseUrl }), fetchImpl: retainingFetch }, { timeoutMs: 10_000 })
+        : await fetch(`${url}/v1/probe`, {
+          method: "POST", headers: { authorization: "Bearer compression-test-only", "content-type": "application/json" },
+          body: JSON.stringify({ poolId: pool.id, upstreamId: "one", timeoutMs: 10_000 }), signal: AbortSignal.timeout(3000),
+        }).then((response) => response.json());
+      expect(result).toMatchObject({ status, ok: status === 200 });
+      if (status !== 200) expect(result.error).toBe(`HTTP ${status}`);
+    }
+    await Promise.all(closed);
+  });
+
+  it.each([
+    { discardedStatus: 429, finalStatus: 200, stream: false, via: "direct" },
+    { discardedStatus: 503, finalStatus: 200, stream: true, via: "http" },
+    { discardedStatus: 429, finalStatus: 503, stream: true, via: "direct" },
+  ])("releases a discarded $discardedStatus body and preserves the final $finalStatus response ($via, stream: $stream)", async ({ discardedStatus, finalStatus, stream, via }) => {
+    const closed: Promise<unknown>[] = [];
+    let finalResponse!: http.ServerResponse;
+    const { baseUrl, url } = await responseGateway(async (request, response) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model: string };
+      if (body.model === "one") {
+        closed.push(once(response, "close", { signal: AbortSignal.timeout(2000) }));
+        response.writeHead(discardedStatus, { "content-type": "application/json" });
+        response.write('{"unfinished":');
+      } else {
+        finalResponse = response;
+        response.writeHead(finalStatus, { "content-type": stream ? "text/event-stream" : "application/json" });
+        if (stream) response.write("data: first\n\n");
+        else response.end(JSON.stringify({ id: "final-response", output: "kept readable" }));
+      }
+    });
+    const response = via === "direct"
+      ? await forwardGatewayRequest(pool, { path: "/v1/responses", body: { model: pool.virtualModel, stream } }, { resolve: async () => ({ baseUrl }), fetchImpl: retainingFetch })
+      : await fetch(`${url}/v1/responses`, {
+        method: "POST", headers: { authorization: "Bearer compression-test-only", "content-type": "application/json" },
+        body: JSON.stringify({ model: pool.virtualModel, stream }), signal: AbortSignal.timeout(3000),
+      });
+    expect(response.status).toBe(finalStatus);
+    if (stream) {
+      const reader = response.body!.getReader();
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: first\n\n");
+      await Promise.all(closed);
+      finalResponse.end("data: [DONE]\n\n");
+      const tail: string[] = [];
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        tail.push(new TextDecoder().decode(value));
+      }
+      reader.releaseLock();
+      expect(tail.join("")).toBe("data: [DONE]\n\n");
+    } else {
+      await Promise.all(closed);
+      await expect(response.json()).resolves.toEqual({ id: "final-response", output: "kept readable" });
+    }
   });
 });

@@ -157,6 +157,8 @@ export async function probeGatewayUpstream(
     };
   } finally {
     clearTimeout(timer);
+    // A probe only needs headers; abort also releases an unread or unbounded body.
+    controller.abort();
   }
 }
 
@@ -327,7 +329,10 @@ export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayR
       forwarder.onAttempt?.({ poolId: pool.id, upstreamId: upstream.id, latencyMs: Date.now() - startedAt, error: message });
       if (upstream === candidates[candidates.length - 1]) break;
     } finally {
-      if (!bodyOwnsLifecycle) cleanup();
+      if (!bodyOwnsLifecycle) {
+        controller.abort();
+        cleanup();
+      }
     }
   }
   const message = lastError instanceof Error ? lastError.message : "Gateway upstream request failed";
