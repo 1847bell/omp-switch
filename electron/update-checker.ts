@@ -136,12 +136,12 @@ export class UpdateChecker {
       // The signature is over the exact bytes the CDN served for latest.json — not a re-serialized
       // copy — so a CDN that rewrites whitespace is caught as a signature mismatch.
       if (!verifyManifestSignature(manifestBytes, sigText.trim(), this.publicKeyB64)) {
-        this.recordFailure();
+        await this.recordFailure();
         return null;
       }
       const manifest = parseUpdateManifest(JSON.parse(Buffer.from(manifestBytes).toString("utf8")));
       if (!manifest) {
-        this.recordFailure();
+        await this.recordFailure();
         return null;
       }
       const status = buildUpdateStatus(manifest, this.currentVersion, this.now().toISOString());
@@ -157,7 +157,7 @@ export class UpdateChecker {
     } catch (error) {
       // Network outage, non-200, malformed JSON, or a verify throw — every failure is silent.
       console.warn("update check failed:", error instanceof Error ? error.message : String(error));
-      this.recordFailure();
+      await this.recordFailure();
       return null;
     }
   }
@@ -175,7 +175,11 @@ export class UpdateChecker {
   }
 
   private async recordFailure(): Promise<void> {
-    await this.preferences.setPreference(PREF_LAST_FAILURE_AT, this.now().toISOString());
+    try {
+      await this.preferences.setPreference(PREF_LAST_FAILURE_AT, this.now().toISOString());
+    } catch (error) {
+      console.warn("update failure could not be saved:", error instanceof Error ? error.message : String(error));
+    }
   }
 
   /** Begins the automatic-check schedule: a one-shot after STARTUP_DELAY_MS, then every interval. */

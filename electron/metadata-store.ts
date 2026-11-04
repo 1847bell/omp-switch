@@ -259,37 +259,45 @@ export class MetadataStore {
   }
 
   private async loadFallback(): Promise<void> {
-    const empty = emptyState();
-    let needsPersistence = false;
+    let source: string;
     try {
-      const parsed = JSON.parse(await fs.readFile(this.filePath + ".json", "utf8")) as Record<string, unknown>;
-      const isCurrent = parsed.version === 3 && Array.isArray(parsed.sessionCaches);
-      const rawCaches = Array.isArray(parsed.sessionCaches) ? parsed.sessionCaches : [];
-      const hasLegacyCacheFields = rawCaches.some((cache) => Boolean(asObject(cache)?.messageOffsets));
-      this.fallback = {
-        version: 3,
-        providerLabels: asStringRecord(parsed.providerLabels),
-        snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots.filter(asObject) : [],
-        gatewayPools: Array.isArray(parsed.gatewayPools) ? parsed.gatewayPools as GatewayPool[] : [],
-        gatewayProbeHistory: Array.isArray(parsed.gatewayProbeHistory) ? parsed.gatewayProbeHistory as GatewayProbeRecord[] : [],
-        sessionCaches: isCurrent ? (rawCaches as SessionFileCache[]).map(cloneCache) : [],
-        preferences: asObject(parsed.preferences) ?? {},
-      };
-      let migratedHistory = false;
-      for (const record of this.fallback.gatewayProbeHistory) {
-        if (record.profile !== undefined) continue;
-        const owners = new Set(this.fallback.gatewayPools.filter((pool) => pool.id === record.poolId).map((pool) => pool.profile));
-        // Persist unresolved ownership too, so a newly created pool cannot inherit old probes.
-        record.profile = owners.size === 1 ? owners.values().next().value! : "";
-        migratedHistory = true;
-      }
-      const migratedListeners = migrateGatewayListeners(this.fallback.gatewayPools, this.fallback.preferences);
-      needsPersistence = !isCurrent || "sessionIndex" in parsed || hasLegacyCacheFields || migratedHistory || migratedListeners;
-    } catch {
-      this.fallback = empty;
+      source = await fs.readFile(this.filePath + ".json", "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      this.fallback = emptyState();
+      return;
     }
+    const parsed = JSON.parse(source) as Record<string, unknown>;
+    for (const key of ["gatewayPools", "gatewayProbeHistory"] as const) {
+      if (Array.isArray(parsed[key]) && parsed[key].some((entry) => !asObject(entry))) {
+        throw new Error(`Invalid metadata ${key}: expected object records`);
+      }
+    }
+    const isCurrent = parsed.version === 3 && Array.isArray(parsed.sessionCaches);
+    const rawCaches = Array.isArray(parsed.sessionCaches) ? parsed.sessionCaches : [];
+    const hasLegacyCacheFields = rawCaches.some((cache) => Boolean(asObject(cache)?.messageOffsets));
+    const loaded: MetadataState = {
+      version: 3,
+      providerLabels: asStringRecord(parsed.providerLabels),
+      snapshots: Array.isArray(parsed.snapshots) ? parsed.snapshots.filter(asObject) : [],
+      gatewayPools: Array.isArray(parsed.gatewayPools) ? parsed.gatewayPools as GatewayPool[] : [],
+      gatewayProbeHistory: Array.isArray(parsed.gatewayProbeHistory) ? parsed.gatewayProbeHistory as GatewayProbeRecord[] : [],
+      sessionCaches: isCurrent ? (rawCaches as SessionFileCache[]).map(cloneCache) : [],
+      preferences: asObject(parsed.preferences) ?? {},
+    };
+    let migratedHistory = false;
+    for (const record of loaded.gatewayProbeHistory) {
+      if (record.profile !== undefined) continue;
+      const owners = new Set(loaded.gatewayPools.filter((pool) => pool.id === record.poolId).map((pool) => pool.profile));
+      // Persist unresolved ownership too, so a newly created pool cannot inherit old probes.
+      record.profile = owners.size === 1 ? owners.values().next().value! : "";
+      migratedHistory = true;
+    }
+    const migratedListeners = migrateGatewayListeners(loaded.gatewayPools, loaded.preferences);
+    const needsPersistence = !isCurrent || "sessionIndex" in parsed || hasLegacyCacheFields || migratedHistory || migratedListeners;
+    this.fallback = loaded;
     // Migration write errors must propagate without replacing the loaded state with an empty store.
-    if (needsPersistence) await this.persistFallback();
+    if (needsPersistence) await this.mutateFallback(() => undefined);
   }
 
   async setProviderLabel(providerId: string, label: string): Promise<void> {
@@ -297,8 +305,7 @@ export class MetadataStore {
       this.sqlite.prepare("INSERT INTO provider_meta(provider_id, label) VALUES(?, ?) ON CONFLICT(provider_id) DO UPDATE SET label=excluded.label").run(providerId, label);
       return;
     }
-    this.fallback.providerLabels[providerId] = label;
-    await this.persistFallback();
+    await this.mutateFallback((state) => { state.providerLabels[providerId] = label; });
   }
 
   getProviderLabels(): Record<string, string> {
@@ -317,8 +324,9 @@ export class MetadataStore {
       ).run(snapshot.profile, snapshot.profile, SNAPSHOT_RETENTION);
       return;
     }
-    this.fallback.snapshots = [snapshot, ...this.fallback.snapshots.filter((item) => item.id !== snapshot.id)].slice(0, SNAPSHOT_RETENTION);
-    await this.persistFallback();
+    await this.mutateFallback((state) => {
+      state.snapshots = [snapshot, ...state.snapshots.filter((item) => item.id !== snapshot.id)].slice(0, SNAPSHOT_RETENTION);
+    });
   }
 
   listSnapshots(profile: string): Array<Record<string, unknown>> {
@@ -362,8 +370,9 @@ export class MetadataStore {
       this.sqlite.prepare("INSERT INTO gateway_pools(id, profile, payload) VALUES(?, ?, ?) ON CONFLICT(profile, id) DO UPDATE SET payload=excluded.payload").run(pool.id, pool.profile, JSON.stringify(pool));
       return;
     }
-    this.fallback.gatewayPools = [pool, ...this.fallback.gatewayPools.filter((item) => item.id !== pool.id || item.profile !== pool.profile)];
-    await this.persistFallback();
+    await this.mutateFallback((state) => {
+      state.gatewayPools = [pool, ...state.gatewayPools.filter((item) => item.id !== pool.id || item.profile !== pool.profile)];
+    });
   }
 
   getGatewayPoolRevision(profile: string, poolId: string): number {
@@ -389,21 +398,14 @@ export class MetadataStore {
         throw error;
       }
     }
-    const matchesPool = (item: GatewayPool): boolean => item.profile === profile && item.id === poolId;
-    const pools = this.fallback.gatewayPools.filter(matchesPool);
-    const poolIndex = this.fallback.gatewayPools.findIndex(matchesPool);
-    const history = this.fallback.gatewayProbeHistory.filter((item) => item.profile === profile && item.poolId === poolId);
-    this.fallback.gatewayPools = this.fallback.gatewayPools.filter((item) => !matchesPool(item));
-    this.fallback.gatewayProbeHistory = this.fallback.gatewayProbeHistory.filter((item) => item.profile !== profile || item.poolId !== poolId);
-    revisions.set(poolId, revision + 1);
-    await this.persistFallback(() => {
-      // Restore only this deletion's data; other pending writes must survive a failed replacement.
-      if (!this.fallback.gatewayPools.some(matchesPool)) this.fallback.gatewayPools.splice(poolIndex, 0, ...pools);
-      const ids = new Set(this.fallback.gatewayProbeHistory.map((item) => item.id));
-      this.fallback.gatewayProbeHistory.push(...history.filter((item) => !ids.has(item.id)));
-      if (revisions.get(poolId) === revision + 1) revisions.set(poolId, revision);
+    return this.mutateFallback((state) => {
+      const existed = state.gatewayPools.some((item) => item.profile === profile && item.id === poolId);
+      state.gatewayPools = state.gatewayPools.filter((item) => item.profile !== profile || item.id !== poolId);
+      state.gatewayProbeHistory = state.gatewayProbeHistory.filter((item) => item.profile !== profile || item.poolId !== poolId);
+      return existed;
+    }, () => {
+      revisions.set(poolId, this.getGatewayPoolRevision(profile, poolId) + 1);
     });
-    return pools.length > 0;
   }
 
   listGatewayPools(profile?: string): GatewayPool[] {
@@ -416,11 +418,9 @@ export class MetadataStore {
   }
 
   async recordGatewayProbe(record: GatewayProbeRecord, expectedRevision?: number): Promise<void> {
-    if (expectedRevision !== undefined) {
+    if (this.sqlite && expectedRevision !== undefined) {
       if (this.getGatewayPoolRevision(record.profile, record.poolId) !== expectedRevision) return;
-      const exists = this.sqlite
-        ? this.sqlite.prepare("SELECT 1 FROM gateway_pools WHERE profile = ? AND id = ?").get(record.profile, record.poolId)
-        : this.fallback.gatewayPools.some((pool) => pool.profile === record.profile && pool.id === record.poolId);
+      const exists = this.sqlite.prepare("SELECT 1 FROM gateway_pools WHERE profile = ? AND id = ?").get(record.profile, record.poolId);
       if (!exists) return;
     }
     const id = record.id || randomUUID();
@@ -434,12 +434,15 @@ export class MetadataStore {
       ).run(item.profile, item.poolId, item.upstreamId, item.profile, item.poolId, item.upstreamId, PROBE_HISTORY_RETENTION);
       return;
     }
-    const current = this.fallback.gatewayProbeHistory ?? [];
-    const updated = [item, ...current.filter((entry) => entry.id !== id)];
-    const matching = updated.filter((entry) => entry.profile === item.profile && entry.poolId === item.poolId && entry.upstreamId === item.upstreamId).sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, PROBE_HISTORY_RETENTION);
-    const others = updated.filter((entry) => !(entry.profile === item.profile && entry.poolId === item.poolId && entry.upstreamId === item.upstreamId));
-    this.fallback.gatewayProbeHistory = [...matching, ...others];
-    await this.persistFallback();
+    await this.mutateFallback((state) => {
+      const updated = [item, ...state.gatewayProbeHistory.filter((entry) => entry.id !== id)];
+      const matching = updated.filter((entry) => entry.profile === item.profile && entry.poolId === item.poolId && entry.upstreamId === item.upstreamId).sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, PROBE_HISTORY_RETENTION);
+      const others = updated.filter((entry) => !(entry.profile === item.profile && entry.poolId === item.poolId && entry.upstreamId === item.upstreamId));
+      state.gatewayProbeHistory = [...matching, ...others];
+    }, undefined, () => expectedRevision === undefined || (
+      this.getGatewayPoolRevision(item.profile, item.poolId) === expectedRevision
+      && this.fallback.gatewayPools.some((pool) => pool.profile === item.profile && pool.id === item.poolId)
+    ));
   }
 
   listGatewayProbeHistory(profile: string, poolId?: string, upstreamId?: string): GatewayProbeRecord[] {
@@ -485,11 +488,9 @@ export class MetadataStore {
   async replaceSessionCaches(profile: string, caches: SessionFileCache[]): Promise<void> {
     const next = caches.filter((cache) => cache.profile === profile).map(cloneCache);
     if (!this.sqlite) {
-      this.fallback.sessionCaches = [
-        ...this.fallback.sessionCaches.filter((cache) => cache.profile !== profile),
-        ...next,
-      ];
-      await this.persistFallback();
+      await this.mutateFallback((state) => {
+        state.sessionCaches = [...state.sessionCaches.filter((cache) => cache.profile !== profile), ...next];
+      });
       return;
     }
 
@@ -527,8 +528,9 @@ export class MetadataStore {
     const selected = new Set(ids);
     if (!selected.size) return;
     if (!this.sqlite) {
-      this.fallback.sessionCaches = this.fallback.sessionCaches.filter((cache) => cache.profile !== profile || !selected.has(cache.id));
-      await this.persistFallback();
+      await this.mutateFallback((state) => {
+        state.sessionCaches = state.sessionCaches.filter((cache) => cache.profile !== profile || !selected.has(cache.id));
+      });
       return;
     }
     this.sqlite.exec("BEGIN IMMEDIATE");
@@ -646,8 +648,21 @@ export class MetadataStore {
       this.sqlite.prepare("INSERT INTO preferences(key, payload) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload").run(key, JSON.stringify(value));
       return;
     }
-    this.fallback.preferences[key] = value;
-    await this.persistFallback();
+    await this.mutateFallback((state) => { state.preferences[key] = value; });
+  }
+
+  /** Keeps preference reads, updates and persistence in the same transaction. */
+  async updatePreference<T>(key: string, update: (current: T | undefined) => T): Promise<T> {
+    if (this.sqlite) {
+      const value = update(this.getPreference<T>(key));
+      await this.setPreference(key, value);
+      return value;
+    }
+    return this.mutateFallback((state) => {
+      const value = update(structuredClone(state.preferences[key]) as T | undefined);
+      state.preferences[key] = value;
+      return value;
+    });
   }
 
   getPreference<T>(key: string): T | undefined {
@@ -658,22 +673,28 @@ export class MetadataStore {
     return this.fallback.preferences[key] as T | undefined;
   }
 
-  private persistFallback(rollback?: () => void): Promise<void> {
+  private mutateFallback<T>(mutate: (state: MetadataState) => T, committed?: () => void): Promise<T>;
+  private mutateFallback(mutate: (state: MetadataState) => void, committed: undefined, guard: () => boolean): Promise<void>;
+  private mutateFallback<T>(mutate: (state: MetadataState) => T, committed?: () => void, guard?: () => boolean): Promise<T | void> {
     const write = this.fallbackWrites.then(async () => {
+      if (guard && !guard()) return;
+      // Only this queued operation owns the draft; readers retain the last durable state.
+      const next = { ...this.fallback, providerLabels: { ...this.fallback.providerLabels }, preferences: { ...this.fallback.preferences } };
+      const result = mutate(next);
       const target = this.filePath + ".json";
       const temporary = target + "." + randomUUID() + ".tmp";
       try {
         await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(temporary, JSON.stringify(this.fallback, null, 2), "utf8");
+        await fs.writeFile(temporary, JSON.stringify(next, null, 2), "utf8");
         await fs.rename(temporary, target);
-      } catch (error) {
-        rollback?.();
-        throw error;
+        this.fallback = next;
+        committed?.();
+        return result;
       } finally {
         await fs.rm(temporary, { force: true }).catch(() => undefined);
       }
     });
-    this.fallbackWrites = write.catch(() => undefined);
+    this.fallbackWrites = write.then(() => undefined, () => undefined);
     return write;
   }
 }

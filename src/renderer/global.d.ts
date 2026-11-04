@@ -63,7 +63,7 @@ export interface OmpSwitchApi {
   deleteGatewayPool(profileId: string, poolId: string): Promise<void>;
   gatewayStatus(profileId: string): Promise<{ running: boolean; profileId: string | null; port: number | null; upstreams: GatewayUpstreamStat[]; token?: string }>;
   gatewayHealth(profileId: string, poolId?: string): Promise<Record<string, GatewayUpstreamHealth>>;
-  probeGatewayUpstream(profileId: string, poolId: string, upstreamId: string, timeoutMs?: number): Promise<{ ok: boolean; status?: number; latencyMs: number; error?: string }>;
+  probeGatewayUpstream(profileId: string, poolId: string, upstreamId: string, expectedPoolVersion: string, timeoutMs?: number): Promise<{ ok: boolean; status?: number; latencyMs: number; error?: string }>;
   startGateway(profileId: string): Promise<{ running: true; profileId: string; port: number; token: string }>;
   stopGateway(expectedProfileId: string): Promise<void>;
   updateOmp(profileId?: string): Promise<{ ok: boolean; output: string; installation?: { version: string | null; supported: boolean; reason?: string }; snapshot?: Snapshot }>;

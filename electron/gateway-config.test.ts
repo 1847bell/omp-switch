@@ -122,6 +122,57 @@ describe.each(["auto", "json"] as const)("production gateway save boundary (%s)"
     expect(await (await request(renamed.virtualModel)).json()).toMatchObject({ model: "model-two" });
   });
 
+  it("refreshes provider routing on save while admitted requests retain their old resolver", async () => {
+    const { store, config, pool, start, request, controls } = await fixture(backend);
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const admitted = new Promise<void>((resolve) => { entered = resolve; });
+    controls.beforeResolve = async () => { entered(); await gate; };
+    await start();
+    const pending = request(pool.virtualModel);
+    try {
+      await admitted;
+      controls.revision = "provider-added";
+      controls.beforeResolve = undefined;
+      const updated = { ...pool, upstreams: [{ ...pool.upstreams[0], providerId: "added", modelId: "added-model" }] };
+      await config.save(store, updated);
+      expect(await (await request(pool.virtualModel)).json()).toMatchObject({
+        route: "/alpha/provider-added/added/v1/chat/completions", model: "added-model", owner: "alpha-provider-added",
+      });
+      expect(store.listGatewayPools("alpha")).toEqual([updated]);
+    } finally {
+      release();
+    }
+    expect(await (await pending).json()).toMatchObject({
+      route: "/alpha/original/first/v1/chat/completions", model: "model-one", owner: "alpha-original",
+    });
+  });
+
+  it.each(["resolver", "persistence"] as const)("retains saved routing and provider snapshots after %s fails during live save", async (failure) => {
+    const { store, config, pool, start, request, controls } = await fixture(backend);
+    await start();
+    controls.revision = "unpublished";
+    controls.resolverError = failure === "resolver";
+    const write = failure === "persistence"
+      ? vi.spyOn(store, "saveGatewayPool").mockRejectedValueOnce(new Error("persistence failed"))
+      : null;
+    const updated = { ...pool, virtualModel: "virtual/unpublished" };
+    try {
+      await expect(config.save(store, updated)).rejects.toThrow(`${failure} failed`);
+      expect(store.listGatewayPools("alpha")).toEqual([pool]);
+      expect(await (await request(pool.virtualModel)).json()).toMatchObject({
+        route: "/alpha/original/first/v1/chat/completions", owner: "alpha-original",
+      });
+      expect((await request(updated.virtualModel)).status).toBe(404);
+    } finally {
+      write?.mockRestore();
+      controls.resolverError = false;
+    }
+    await config.save(store, updated);
+    expect(await (await request(updated.virtualModel)).json()).toMatchObject({ owner: "alpha-unpublished" });
+  });
+
   it("keeps listening with no enabled pools and re-enables the last pool without restarting", async () => {
     const { store, config, pool, start, request, models } = await fixture(backend);
     await start();
@@ -283,12 +334,13 @@ describe.each(["auto", "json"] as const)("gateway lifecycle ownership (%s)", (ba
     gate.emit("released");
     expect(await (await pending).json()).toMatchObject({ route: "/alpha/original/first/v1/chat/completions", owner: "alpha-original" });
     expect(config.status().upstreams).toEqual([]);
-    expect(store.listGatewayProbeHistory("alpha", pool.id, "one")).toEqual([
-      expect.objectContaining({ profile: "alpha", poolId: pool.id, upstreamId: "one", status: 200 }),
-    ]);
     expect(store.listGatewayProbeHistory("beta", pool.id)).toEqual([]);
     expect(await (await request(pool.virtualModel)).json()).toMatchObject({ owner: "beta-original" });
     expect(config.status().upstreams).toHaveLength(1);
+    await config.stop("beta");
+    expect(store.listGatewayProbeHistory("alpha", pool.id, "one")).toEqual([
+      expect.objectContaining({ profile: "alpha", poolId: pool.id, upstreamId: "one", status: 200 }),
+    ]);
   });
 });
 

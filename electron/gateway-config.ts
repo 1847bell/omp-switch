@@ -129,8 +129,12 @@ export class GatewayConfigCoordinator {
     return this.runExclusive(async () => {
       validateGatewayPool(pool);
       const active = this.active;
+      const resolved = active?.server.running && active.profile === pool.profile
+        ? await this.dependencies.resolveForwarder(pool.profile)
+        : null;
       await store.saveGatewayPool(pool);
-      if (active?.server.running && active.profile === pool.profile) {
+      if (active && resolved) {
+        active.resolved = resolved;
         this.updatePools(store, active);
       }
       return pool;

@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { MetadataStore } from "./metadata-store";
 import { UpdateChecker, isAllowedExternalUrl, type UpdateCheckerOptions } from "./update-checker";
 import { MANIFEST_URL, MANIFEST_SIG_URL, type UpdateManifest } from "@omp-switch/core";
 
@@ -108,6 +112,61 @@ describe("UpdateChecker throttle and behavior", () => {
     expect(result).toBeNull();
     // lastCheckAt is only advanced on success; a failure records a failure marker instead.
     expect(checker.getSnapshot().lastCheckAt).toBe(before);
+  });
+
+  it.each(["network", "signature", "manifest"] as const)("keeps checks coalesced until the JSON %s failure marker is durable", async (failure) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-update-backoff-"));
+    const store = new MetadataStore(root, { backend: "json" });
+    await store.init();
+    const signed = signedFetch(failure === "manifest" ? { ...MANIFEST, version: 2 } as unknown as UpdateManifest : MANIFEST);
+    let calls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls++;
+      if (failure === "network") return new Response("", { status: 503 });
+      if (failure === "signature" && String(input) === MANIFEST_SIG_URL) return new Response(Buffer.alloc(64).toString("base64"));
+      return signed.fetchImpl(input, init);
+    };
+    const checker = buildChecker({ preferences: store, fetchImpl, now: () => new Date("2026-09-02T00:00:00Z"), publicKeyB64: signed.publicKeyB64 });
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const originalRename = fs.rename;
+    const rename = vi.spyOn(fs, "rename").mockImplementationOnce(async (...args) => {
+      enter();
+      await gate;
+      return originalRename(...args);
+    });
+    try {
+      let settled = false;
+      const first = checker.check(false).then((result) => { settled = true; return result; });
+      await entered;
+      await new Promise(setImmediate);
+      const settledBeforeCommit = settled;
+      const second = checker.check(false);
+      release();
+      expect(await Promise.all([first, second])).toEqual([null, null]);
+      await store.setPreference("test.flush", true);
+      expect(settledBeforeCommit).toBe(false);
+      expect(store.getPreference("update.lastFailureAt")).toBe("2026-09-02T00:00:00.000Z");
+      expect(await checker.check(false)).toBeNull();
+      expect(calls).toBe(failure === "network" ? 1 : 2);
+    } finally {
+      release();
+      rename.mockRestore();
+      store.close();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null if persisting a failure marker also fails", async () => {
+    const checker = buildChecker({
+      preferences: { getPreference: () => undefined, setPreference: async () => { throw new Error("read-only metadata"); } },
+      fetchImpl: async () => new Response("", { status: 503 }),
+      now: () => new Date("2026-09-02T00:00:00Z"),
+      publicKeyB64: "d".repeat(43) + "=",
+    });
+    expect(await checker.check(false)).toBeNull();
   });
 
   it("stays silent and returns null on a tampered manifest (signature mismatch)", async () => {

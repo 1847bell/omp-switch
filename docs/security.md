@@ -117,6 +117,12 @@ It mirrors Oh My Pi's own auth-gateway posture:
   It atomically removes the pool and its health history, never its shared credentials. In-memory deletion
   revisions reject late observations, including after same-ID recreation. Admitted requests may complete;
   deletion is not cancellation or credential revocation. Removing the last route does not stop the listener.
+- JSON metadata mutations and atomic replacement share a queue transaction. Memory and deletion revisions
+  publish only after replacement succeeds; failed writes preserve the durable state. Gateway migration
+  failures abort initialization rather than falling back to an empty metadata store.
+- Trusted probe IPC requires the expected saved-pool version. The main process checks the snapshot and
+  enabled upstream before and after resolver preparation, and rechecks deletion revisions before dispatch.
+  Abandoning a page stops subsequent batch dispatch; already admitted probes may finish.
 - A **non-loopback `Host` header is rejected with 421.** A browser can reach `127.0.0.1`, so this is
   what defeats DNS rebinding.
 - Any request carrying an **`Origin` header is rejected with 403**, and no `Access-Control-Allow-*`

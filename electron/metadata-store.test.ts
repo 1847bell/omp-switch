@@ -379,6 +379,116 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
     expect(reopened.listGatewayProbeHistory("default", "same")).toHaveLength(2);
   });
 
+  if (backend === "json") it("keeps pool and history durable when an earlier queued writer succeeds and deletion fails", async () => {
+    const { root, store } = await makeStore(backend);
+    const target = pool("target");
+    const observation = { id: "preserved", profile: "default", poolId: "target", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, latencyMs: 12 };
+    await store.saveGatewayPool(target);
+    await store.recordGatewayProbe(observation);
+    let entered!: () => void;
+    let release!: () => void;
+    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const originalMkdir = fs.mkdir.bind(fs);
+    const originalRename = fs.rename.bind(fs);
+    const mkdir = vi.spyOn(fs, "mkdir").mockImplementationOnce(async (...args) => {
+      entered();
+      await blocked;
+      return originalMkdir(...args);
+    });
+    const rename = vi.spyOn(fs, "rename")
+      .mockImplementationOnce(originalRename)
+      .mockRejectedValueOnce(Object.assign(new Error("delete blocked"), { code: "EPERM" }));
+    try {
+      const earlier = store.setProviderLabel("openai", "Earlier writer");
+      await entering;
+      const deletion = expect(store.deleteGatewayPool("default", "target")).rejects.toThrow("delete blocked");
+      expect(store.listGatewayPools("default")).toEqual([target]);
+      expect(store.listGatewayProbeHistory("default", "target")).toEqual([observation]);
+      release();
+      await earlier;
+      await deletion;
+      expect(rename).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+      mkdir.mockRestore();
+      rename.mockRestore();
+    }
+    expect(store.listGatewayPools("default")).toEqual([target]);
+    expect(store.listGatewayProbeHistory("default", "target")).toEqual([observation]);
+    expect(store.getGatewayPoolRevision("default", "target")).toBe(0);
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayPools("default")).toEqual([target]);
+    expect(reopened.listGatewayProbeHistory("default", "target")).toEqual([observation]);
+    expect(reopened.getProviderLabels()).toEqual({ openai: "Earlier writer" });
+  });
+
+  if (backend === "json") it("retains the authoritative listener port after a real rename failure and later unrelated write", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.setGatewayListenerPort("default", 47001);
+    const originalRename = fs.rename.bind(fs);
+    const rename = vi.spyOn(fs, "rename").mockImplementationOnce((source) => originalRename(source, path.join(root, "missing", "metadata.sqlite.json")));
+    try {
+      await expect(store.setGatewayListenerPort("default", 47002)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      rename.mockRestore();
+    }
+    expect(store.getGatewayListenerSettings("default").port).toBe(47001);
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.getGatewayListenerSettings("default").port).toBe(47001);
+    await store.setProviderLabel("openai", "Unrelated later writer");
+    await reopened.init();
+    expect(reopened.getGatewayListenerSettings("default").port).toBe(47001);
+    expect(reopened.getProviderLabels()).toEqual({ openai: "Unrelated later writer" });
+  });
+
+  if (backend === "json") it("checks queued observation generations when deletions execute rather than when admitted", async () => {
+    const { root, store } = await makeStore(backend);
+    await store.saveGatewayPool(pool("target"));
+    const observation = { profile: "default", poolId: "target", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, latencyMs: 12 };
+    let entered!: () => void;
+    let release!: () => void;
+    const entering = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const originalMkdir = fs.mkdir.bind(fs);
+    const mkdir = vi.spyOn(fs, "mkdir").mockImplementationOnce(async (...args) => {
+      entered();
+      await blocked;
+      return originalMkdir(...args);
+    });
+    try {
+      const earlier = store.setPreference("earlier", true);
+      await entering;
+      const queued = [
+        store.deleteGatewayPool("default", "target"),
+        store.recordGatewayProbe({ ...observation, id: "deleted-old" }, 0),
+        store.saveGatewayPool(pool("target")),
+        store.recordGatewayProbe({ ...observation, id: "recreated-old" }, 0),
+        store.deleteGatewayPool("default", "target"),
+        store.saveGatewayPool(pool("target")),
+        store.recordGatewayProbe({ ...observation, id: "second-generation-old" }, 1),
+      ];
+      release();
+      await earlier;
+      await Promise.all(queued);
+    } finally {
+      release();
+      mkdir.mockRestore();
+    }
+    expect(store.getGatewayPoolRevision("default", "target")).toBe(2);
+    expect(store.listGatewayProbeHistory("default", "target")).toEqual([]);
+    await store.recordGatewayProbe({ ...observation, id: "current" }, 2);
+    const reopened = new MetadataStore(root, { backend });
+    openStores.push(reopened);
+    await reopened.init();
+    expect(reopened.listGatewayProbeHistory("default", "target").map((item) => item.id)).toEqual(["current"]);
+  });
+
   if (backend === "json") it("preserves concurrent unrelated JSON updates when deletion replacement fails", async () => {
     const { root, store } = await makeStore(backend);
     await store.saveGatewayPool(pool("target"));
@@ -531,6 +641,51 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
     expect(store.getPreference<Array<{ id: string }>>("catalog.entries")).toEqual([{ id: "custom" }]);
   });
 
+  it("merges concurrent preference updates against the latest durable value", async () => {
+    const { root, store } = await makeStore(backend);
+    type Prices = Record<string, { input: number }>;
+    const update = (key: string, input: number) => store.updatePreference<Prices>("usage.pricing", (current) => {
+      const prices = current ?? {};
+      prices[key] = { input };
+      return prices;
+    });
+    await Promise.all([update("review/one", 1), update("review/two", 2)]);
+    const expected = { "review/one": { input: 1 }, "review/two": { input: 2 } };
+    expect(store.getPreference("usage.pricing")).toEqual(expected);
+    const reopened = new MetadataStore(root, { backend });
+    await reopened.init();
+    openStores.push(reopened);
+    expect(reopened.getPreference("usage.pricing")).toEqual(expected);
+  });
+
+  it.runIf(backend === "json")("discards a failed mutable preference update before applying the next queued update", async () => {
+    const { root, store } = await makeStore(backend);
+    const initial = { nested: { retained: true }, keys: ["original"] };
+    await store.setPreference("review.update", initial);
+    const rename = vi.spyOn(fs, "rename").mockRejectedValueOnce(new Error("preference replacement failed"));
+    const failure = store.updatePreference<typeof initial>("review.update", (current) => {
+      current!.nested.retained = false;
+      current!.keys.push("failed");
+      return current!;
+    });
+    const next = store.updatePreference<typeof initial>("review.update", (current) => {
+      current!.keys.push("accepted");
+      return current!;
+    });
+    try {
+      await expect(failure).rejects.toThrow("preference replacement failed");
+      await next;
+    } finally {
+      rename.mockRestore();
+    }
+    const expected = { nested: { retained: true }, keys: ["original", "accepted"] };
+    expect(store.getPreference("review.update")).toEqual(expected);
+    const reopened = new MetadataStore(root, { backend });
+    await reopened.init();
+    openStores.push(reopened);
+    expect(reopened.getPreference("review.update")).toEqual(expected);
+  });
+
   it("survives a reopen of the same directory", async () => {
     const { root, store } = await makeStore(backend);
     await store.setGatewayListenerPort("default", 46123);
@@ -545,6 +700,25 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
 });
 
 describe("MetadataStore migration", () => {
+  it.each(["gatewayPools", "gatewayProbeHistory"] as const)("rejects null %s migration records without replacing unrelated disk state", async (key) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-metadata-invalid-migration-"));
+    tempRoots.push(root);
+    const target = path.join(root, "metadata.sqlite.json");
+    const original = JSON.stringify({
+      version: 3, providerLabels: { openai: "Preserved" },
+      snapshots: [{ id: "snapshot", profile: "work", createdAt: "2026-11-04T00:00:00Z" }],
+      gatewayPools: [pool("owned", "work")], gatewayProbeHistory: [], sessionCaches: [],
+      preferences: { unrelated: { retained: true } }, [key]: [null],
+    });
+    await fs.writeFile(target, original, "utf8");
+    const store = new MetadataStore(root, { backend: "json" });
+    openStores.push(store);
+    await expect(store.init()).rejects.toThrow(`Invalid metadata ${key}: expected object records`);
+    expect(await fs.readFile(target, "utf8")).toBe(original);
+    await expect(store.init()).rejects.toThrow(`Invalid metadata ${key}: expected object records`);
+    expect(await fs.readFile(target, "utf8")).toBe(original);
+  });
+
   it("rolls back listener settings, pool port removal and obsolete preferences together", async () => {
     const { root, store } = await makeStore("auto");
     store.close();

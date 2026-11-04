@@ -226,7 +226,7 @@ export function isRetryableGatewayStatus(status: number | undefined): boolean {
   return status === undefined || status === 408 || status === 429 || status >= 500;
 }
 
-function managedGatewayResponse(response: Response, signal: AbortSignal, renewTimeout: () => void, cleanup: () => void): Response {
+function managedGatewayResponse(response: Response, signal: AbortSignal, renewTimeout: () => void, pauseTimeout: () => void, cleanup: () => void): Response {
   const reader = response.body!.getReader();
   let finished = false;
   let streamController: ReadableStreamDefaultController<Uint8Array>;
@@ -250,19 +250,20 @@ function managedGatewayResponse(response: Response, signal: AbortSignal, renewTi
       streamController = controller;
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
-      else renewTimeout();
+      else pauseTimeout();
     },
     async pull(controller) {
       if (finished) return;
+      renewTimeout();
       try {
         const chunk = await reader.read();
+        pauseTimeout();
         if (finished) return;
         if (chunk.done) {
           finish();
           reader.releaseLock();
           controller.close();
         } else {
-          renewTimeout();
           controller.enqueue(chunk.value);
         }
       } catch (error) {
@@ -295,12 +296,19 @@ export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayR
     }
     const startedAt = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new DOMException(`Upstream idle timeout after ${timeoutMs}ms`, "TimeoutError")), timeoutMs);
-    timer.unref();
-    const renewTimeout = () => { timer.refresh(); };
+    let timer: NodeJS.Timeout | undefined;
+    const pauseTimeout = () => {
+      clearTimeout(timer);
+      timer = undefined;
+    };
+    const renewTimeout = () => {
+      pauseTimeout();
+      timer = setTimeout(() => controller.abort(new DOMException(`Upstream idle timeout after ${timeoutMs}ms`, "TimeoutError")), timeoutMs);
+      timer.unref();
+    };
     const onAbort = () => controller.abort(request.signal?.reason);
     const cleanup = () => {
-      clearTimeout(timer);
+      pauseTimeout();
       request.signal?.removeEventListener("abort", onAbort);
     };
     let bodyOwnsLifecycle = false;
@@ -320,7 +328,7 @@ export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayR
       forwarder.onAttempt?.({ poolId: pool.id, upstreamId: upstream.id, status: response.status, latencyMs: Date.now() - startedAt });
       if (!isRetryableGatewayStatus(response.status) || upstream === candidates[candidates.length - 1] || request.signal?.aborted) {
         if (!response.body) return response;
-        const managed = managedGatewayResponse(response, controller.signal, renewTimeout, cleanup);
+        const managed = managedGatewayResponse(response, controller.signal, renewTimeout, pauseTimeout, cleanup);
         bodyOwnsLifecycle = true;
         return managed;
       }

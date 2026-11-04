@@ -124,6 +124,70 @@ describe("gateway response lifecycle", () => {
     expect(upstream.paths).toEqual(["/one/v1/responses"]);
   });
 
+  it("preserves an enqueued finite body when consumption is delayed beyond the idle deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("complete response"));
+        controller.close();
+      },
+    });
+    const response = await forwardGatewayRequest(pool, { path: "/v1/responses", body: {} }, {
+      resolve: async () => ({ baseUrl: "https://local.example" }), timeoutMs: 100,
+      fetchImpl: async () => new Response(body),
+    });
+    await vi.advanceTimersByTimeAsync(300);
+    await expect(response.text()).resolves.toBe("complete response");
+    expect(body.locked).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("times out a pending upstream read and releases the source without retrying", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    const fetchImpl = vi.fn(async () => new Response(body));
+    const response = await forwardGatewayRequest(pool, { path: "/v1/responses", body: {} }, {
+      resolve: async () => ({ baseUrl: "https://local.example" }), timeoutMs: 100, fetchImpl,
+    });
+    const reader = response.body!.getReader();
+    const rejected = expect(reader.read()).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(100);
+    await rejected;
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ name: "TimeoutError" }));
+    expect(body.locked).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    reader.releaseLock();
+  });
+
+  it.each(["abort", "cancel"] as const)("releases a backpressured upstream on explicit %s", async (action) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode("queued frame")); },
+      cancel,
+    });
+    const controller = new AbortController();
+    const reason = new DOMException("Caller stopped", "AbortError");
+    const response = await forwardGatewayRequest(pool, { path: "/v1/responses", body: {}, signal: controller.signal }, {
+      resolve: async () => ({ baseUrl: "https://local.example" }), timeoutMs: 100,
+      fetchImpl: async () => new Response(body),
+    });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(cancel).not.toHaveBeenCalled();
+    if (action === "abort") {
+      controller.abort(reason);
+      await expect(response.text()).rejects.toBe(reason);
+    } else {
+      await response.body!.cancel(reason);
+    }
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledWith(reason);
+    expect(body.locked).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("renews the idle deadline for each frame so a healthy stream can outlive one timeout window", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let source!: ReadableStreamDefaultController<Uint8Array>;
@@ -141,6 +205,8 @@ describe("gateway response lifecycle", () => {
     source.close();
     expect(await reader.read()).toEqual({ done: true, value: undefined });
     reader.releaseLock();
+    expect(body.locked).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

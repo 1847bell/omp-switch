@@ -339,9 +339,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("catalog:import", async (_event, input: unknown) => {
     const bundle = validateCatalogBundle(input);
-    const current = metadata.getPreference<import("@omp-switch/core").ProviderPreset[]>("catalog.entries") ?? [];
-    const merged = mergeCatalogBundle(current, bundle);
-    await metadata.setPreference("catalog.entries", merged);
+    const merged = await metadata.updatePreference<CatalogBundle["entries"]>("catalog.entries", (current) => mergeCatalogBundle(current ?? [], bundle));
     return { version: 1, source: "local", entries: merged } satisfies CatalogBundle;
   });
   ipcMain.handle("catalog:export", () => ({ version: 1, source: "local", entries: metadata.getPreference<import("@omp-switch/core").ProviderPreset[]>("catalog.entries") ?? [] } satisfies CatalogBundle));
@@ -461,18 +459,19 @@ function registerIpc(): void {
   });
   ipcMain.handle("usage:set-price", async (_event, key: string, price: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | null) => {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[^\s]{1,160}$/.test(key)) throw new Error("Pricing key must be provider/model");
-    const overrides = { ...(metadata.getPreference<PricingTable>("usage.pricing") ?? {}) };
-    if (price === null) delete overrides[key];
-    else {
+    if (price !== null) {
       for (const value of Object.values(price)) {
         if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
           throw new Error("Prices must be finite non-negative numbers per million tokens");
         }
       }
-      overrides[key] = price;
     }
-    await metadata.setPreference("usage.pricing", overrides);
-    return overrides;
+    return metadata.updatePreference<PricingTable>("usage.pricing", (current) => {
+      const overrides = current ?? {};
+      if (price === null) delete overrides[key];
+      else overrides[key] = price;
+      return overrides;
+    });
   });
   ipcMain.handle("gateway:list", (_event, profileId: string) => metadata.listGatewayPools(safeSessionProfileId(profileId)));
   ipcMain.handle("gateway:listener-settings", (_event, profileId: string) => metadata.getGatewayListenerSettings(safeSessionProfileId(profileId)));
@@ -484,15 +483,22 @@ function registerIpc(): void {
   ipcMain.handle("gateway:delete", (_event, profileId: string, poolId: string) => gatewayConfig.delete(metadata, safeSessionProfileId(profileId), poolId));
   ipcMain.handle("gateway:status", (_event, profileId: string) => gatewayConfig.status(safeSessionProfileId(profileId)));
   ipcMain.handle("gateway:health", (_event, profileId: string, poolId?: string) => metadata.getGatewayHealth(safeSessionProfileId(profileId), poolId));
-  ipcMain.handle("gateway:probe", async (_event, profile: string, poolId: string, upstreamId: string, timeoutMs?: number) => {
+  ipcMain.handle("gateway:probe", async (_event, profile: string, poolId: string, upstreamId: string, expectedPoolVersion: string, timeoutMs?: number) => {
     const profileId = safeSessionProfileId(profile);
     const pools = metadata.listGatewayPools(profileId);
     const pool = pools.find((candidate) => candidate.id === poolId);
     if (!pool) throw new Error("Unknown gateway pool");
+    if (typeof expectedPoolVersion !== "string" || JSON.stringify(pool) !== expectedPoolVersion) throw new Error("Gateway probe configuration changed; reload the saved pool before probing");
     const upstream = pool.upstreams.find((candidate) => candidate.id === upstreamId);
     if (!upstream) throw new Error("Unknown gateway upstream");
+    if (!upstream.enabled) throw new Error("Gateway upstream is disabled");
     const revision = metadata.getGatewayPoolRevision(profileId, poolId);
     const forwarder = await resolveGatewayForwarder(profileId);
+    const currentPool = metadata.listGatewayPools(profileId).find((candidate) => candidate.id === poolId);
+    if (metadata.getGatewayPoolRevision(profileId, poolId) !== revision || JSON.stringify(currentPool) !== expectedPoolVersion) {
+      throw new Error("Gateway probe configuration changed; reload the saved pool before probing");
+    }
+    if (!currentPool?.upstreams.some((candidate) => candidate.id === upstreamId && candidate.enabled)) throw new Error("Gateway upstream is disabled");
     const result = await probeGatewayUpstream(upstream, forwarder, { timeoutMs });
     await metadata.recordGatewayProbe({
       profile: profileId,

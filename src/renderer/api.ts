@@ -356,7 +356,15 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
     deleteGatewayPool: async (profileId, poolId) => { gatewayPools.get(profileId)?.delete(poolId); },
     gatewayStatus: async (profileId) => ({ running: runningGateway !== null, profileId: runningGateway?.profile ?? null, port: runningGateway?.port ?? null, upstreams: [], token: runningGateway?.profile === profileId ? runningGateway.token : undefined }),
     gatewayHealth: async (_profileId, _poolId) => ({}),
-    probeGatewayUpstream: async (_profileId, _poolId, _upstreamId, _timeoutMs) => ({ ok: true, status: 200, latencyMs: 115 }),
+    probeGatewayUpstream: async (profileId, poolId, upstreamId, expectedPoolVersion, _timeoutMs) => {
+      const pool = gatewayPools.get(profileId)?.get(poolId);
+      if (!pool) throw new Error("Unknown gateway pool");
+      if (typeof expectedPoolVersion !== "string" || JSON.stringify(pool) !== expectedPoolVersion) throw new Error("Gateway probe configuration changed; reload the saved pool before probing");
+      const upstream = pool.upstreams.find((candidate) => candidate.id === upstreamId);
+      if (!upstream) throw new Error("Unknown gateway upstream");
+      if (!upstream.enabled) throw new Error("Gateway upstream is disabled");
+      return { ok: true, status: 200, latencyMs: 115 };
+    },
     startGateway: async (profileId) => {
       const pool = [...gatewayPools.get(profileId)?.values() ?? []].find((candidate) => candidate.enabled);
       if (!pool) throw new Error("No enabled gateway pools exist for this profile");

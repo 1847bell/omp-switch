@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   Activity,
@@ -129,7 +129,9 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   function openDraft(pool: GatewayPool): void {
-    for (const upstream of pool.upstreams) upstreamRowKeys.set(upstream, crypto.randomUUID());
+    for (const upstream of pool.upstreams) {
+      if (!upstreamRowKeys.has(upstream)) upstreamRowKeys.set(upstream, crypto.randomUUID());
+    }
     setDraft(pool);
   }
 
@@ -233,59 +235,75 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const probeResults = canProbe && probeRun && probeRun.version === draftVersion ? probeRun.results : undefined;
   const isProbing = probingUpstreamId !== null || probingAll;
 
-  async function verifyProbeVersion(pool: GatewayPool): Promise<boolean> {
+  const activeProbeRun = useRef<{ cancelled: boolean } | null>(null);
+  useEffect(() => () => {
+    if (activeProbeRun.current) activeProbeRun.current.cancelled = true;
+  }, []);
+
+  async function verifyProbeVersion(pool: GatewayPool, run: { cancelled: boolean }): Promise<boolean> {
+    if (run.cancelled) return false;
     const currentPools = await api.listGatewayPools(profileId);
+    if (run.cancelled) return false;
     if (JSON.stringify(currentPools.find((candidate) => candidate.id === pool.id)) === JSON.stringify(pool)) return true;
     setPools(currentPools);
     onNotice({ tone: "error", text: t("gateway.probeConfigurationChanged") });
     return false;
   }
 
-  async function probeSavedUpstream(pool: GatewayPool, upstream: GatewayUpstream): Promise<ProbeOutcome> {
+  async function probeSavedUpstream(pool: GatewayPool, upstream: GatewayUpstream, run: { cancelled: boolean }): Promise<ProbeOutcome> {
+    const version = JSON.stringify(pool);
     let result: ProbeOutcome;
     try {
-      result = await api.probeGatewayUpstream(profileId, pool.id, upstream.id);
+      result = await api.probeGatewayUpstream(profileId, pool.id, upstream.id, version);
     } catch (error) {
       result = { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    const version = JSON.stringify(pool);
-    setProbeRun((current) => ({ version, results: { ...(current && current.version === version ? current.results : {}), [upstream.id]: result } }));
+    if (!run.cancelled) {
+      setProbeRun((current) => ({ version, results: { ...(current && current.version === version ? current.results : {}), [upstream.id]: result } }));
+    }
     return result;
   }
 
   async function testProbe(upstream: GatewayUpstream): Promise<void> {
-    if (isProbing || deleting || !upstream.enabled) return;
+    if (activeProbeRun.current || isProbing || deleting || !upstream.enabled) return;
     if (!savedPool || !canProbe) return onNotice({ tone: "info", text: t("gateway.probeSaveFirst") });
     const pool = savedPool;
+    const run = { cancelled: false };
+    activeProbeRun.current = run;
     setProbingUpstreamId(upstream.id);
     try {
-      if (!await verifyProbeVersion(pool)) return;
-      const res = await probeSavedUpstream(pool, upstream);
+      if (!await verifyProbeVersion(pool, run)) return;
+      const res = await probeSavedUpstream(pool, upstream, run);
+      if (run.cancelled) return;
       onNotice(res.ok
         ? { tone: "success", text: t("gateway.probeSuccess", { pool: pool.id, id: upstream.id, latency: res.latencyMs }) }
         : { tone: "error", text: t("gateway.probeFailed", { pool: pool.id, id: upstream.id, error: res.error || "Error" }) });
       const updatedHealth = await api.gatewayHealth(profileId, pool.id);
-      setHealthMap((current) => ({ ...current, ...updatedHealth }));
+      if (!run.cancelled) setHealthMap((current) => ({ ...current, ...updatedHealth }));
     } catch (error) {
-      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      if (!run.cancelled) onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setProbingUpstreamId(null);
+      activeProbeRun.current = null;
+      if (!run.cancelled) setProbingUpstreamId(null);
     }
   }
 
   async function probeAll(): Promise<void> {
-    if (isProbing || deleting) return;
+    if (activeProbeRun.current || isProbing || deleting) return;
     if (!savedPool || !canProbe) return onNotice({ tone: "info", text: t("gateway.probeSaveFirst") });
     const pool = savedPool;
     const targets = pool.upstreams.filter((upstream) => upstream.enabled);
     if (!targets.length) return onNotice({ tone: "info", text: t("gateway.probeNoneEnabled") });
+    const run = { cancelled: false };
+    activeProbeRun.current = run;
     setProbingAll(true);
     const failures: string[] = [];
     try {
-      if (!await verifyProbeVersion(pool)) return;
       for (const upstream of targets) {
+        if (!await verifyProbeVersion(pool, run)) return;
         setProbingUpstreamId(upstream.id);
-        const res = await probeSavedUpstream(pool, upstream);
+        const res = await probeSavedUpstream(pool, upstream, run);
+        if (run.cancelled) return;
         if (!res.ok) failures.push(`${upstream.id}: ${res.error || "Error"}`);
       }
       const counts = { pool: pool.id, count: targets.length, ok: targets.length - failures.length, failed: failures.length };
@@ -293,12 +311,15 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
         ? { tone: "error", text: `${t("gateway.probeAllFailed", counts)} ${failures.join("; ")}` }
         : { tone: "success", text: t("gateway.probeAllFinished", counts) });
       const updatedHealth = await api.gatewayHealth(profileId, pool.id);
-      setHealthMap((current) => ({ ...current, ...updatedHealth }));
+      if (!run.cancelled) setHealthMap((current) => ({ ...current, ...updatedHealth }));
     } catch (error) {
-      onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      if (!run.cancelled) onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
-      setProbingUpstreamId(null);
-      setProbingAll(false);
+      activeProbeRun.current = null;
+      if (!run.cancelled) {
+        setProbingUpstreamId(null);
+        setProbingAll(false);
+      }
     }
   }
 

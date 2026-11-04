@@ -56,7 +56,7 @@ const api = {
   deleteGatewayPool: (profileId: string, poolId: string): Promise<void> => ipcRenderer.invoke("gateway:delete", profileId, poolId),
   gatewayStatus: (profileId: string) => ipcRenderer.invoke("gateway:status", profileId),
   gatewayHealth: (profileId: string, poolId?: string): Promise<Record<string, GatewayUpstreamHealth>> => ipcRenderer.invoke("gateway:health", profileId, poolId),
-  probeGatewayUpstream: (profileId: string, poolId: string, upstreamId: string, timeoutMs?: number) => ipcRenderer.invoke("gateway:probe", profileId, poolId, upstreamId, timeoutMs),
+  probeGatewayUpstream: (profileId: string, poolId: string, upstreamId: string, expectedPoolVersion: string, timeoutMs?: number) => ipcRenderer.invoke("gateway:probe", profileId, poolId, upstreamId, expectedPoolVersion, timeoutMs),
   startGateway: (profileId: string) => ipcRenderer.invoke("gateway:start", profileId),
   stopGateway: (expectedProfileId: string) => ipcRenderer.invoke("gateway:stop", expectedProfileId),
   updateOmp: (profileId = "default") => ipcRenderer.invoke("omp:update", profileId),

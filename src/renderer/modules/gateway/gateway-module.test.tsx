@@ -46,7 +46,8 @@ async function mount(api = createMockApi()) {
   const refresh = async () => {
     await act(async () => { container.querySelector<HTMLButtonElement>(`.module-heading button[aria-label='${i18n.t("common.refresh")}']`)!.click(); });
   };
-  return { container, render, selectPool, editModel, save, model, click, refresh, runningLabel, notices };
+  const hide = async () => { await act(async () => { root.render(null); }); };
+  return { container, render, hide, selectPool, editModel, save, model, click, refresh, runningLabel, notices };
 }
 
 describe("gateway profile isolation", () => {
@@ -285,6 +286,82 @@ describe("gateway saved-configuration probes", () => {
     expect(view.notices).toContainEqual({ tone: "error", text: i18n.t("gateway.probeConfigurationChanged") });
     expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
     expect(button(view.container, "gateway.probeUpstream").disabled).toBe(true);
+  });
+
+  it("stops a batch before the next upstream when the saved version changes", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams.push({ ...saved.upstreams[0], id: "two" });
+    await api.saveGatewayPool(saved);
+    const gate = new EventEmitter();
+    const probe = vi.spyOn(api, "probeGatewayUpstream").mockImplementation(async () => {
+      await once(gate, "finish");
+      return { ok: true, status: 200, latencyMs: 37 };
+    });
+    const view = await mount(api);
+    await view.selectPool();
+    await act(async () => { button(view.container, "gateway.probeAll").click(); });
+    expect(probe).toHaveBeenCalledWith("default", saved.id, "one", JSON.stringify(saved));
+    await api.saveGatewayPool({ ...saved, upstreams: saved.upstreams.map((upstream) => upstream.id === "two" ? { ...upstream, enabled: false } : upstream) });
+    await act(async () => { gate.emit("finish"); });
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(view.notices).toEqual([{ tone: "error", text: i18n.t("gateway.probeConfigurationChanged") }]);
+    expect(button(view.container, "gateway.probeAll").disabled).toBe(true);
+  });
+
+  it.each(["module", "profile"])("abandons a batch across %s remount without more dispatch or stale notices", async (remount) => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams.push({ ...saved.upstreams[0], id: "two" });
+    await api.saveGatewayPool(saved);
+    const gate = new EventEmitter();
+    const probe = vi.spyOn(api, "probeGatewayUpstream").mockImplementation(async () => {
+      await once(gate, "finish");
+      return { ok: true, status: 200, latencyMs: 937 };
+    });
+    const view = await mount(api);
+    await view.selectPool();
+    await act(async () => { button(view.container, "gateway.probeAll").click(); });
+    expect(probe).toHaveBeenCalledTimes(1);
+    if (remount === "module") await view.hide();
+    else await view.render("work");
+    await view.render("default");
+    await view.selectPool();
+    await act(async () => { view.container.querySelector<HTMLInputElement>("input[name='upstreams.1.enabled']")!.click(); });
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[1].enabled).toBe(false);
+    const notices = [...view.notices];
+    await act(async () => { gate.emit("finish"); });
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(view.notices).toEqual(notices);
+    expect([...view.container.querySelectorAll(".health-badge")].map((badge) => badge.textContent)).toEqual([i18n.t("gateway.untested"), i18n.t("gateway.untested")]);
+    expect(button(view.container, "gateway.probeAll").disabled).toBe(false);
+  });
+
+  it("does not dispatch when unmounted while the saved-version check is pending", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const probe = vi.spyOn(api, "probeGatewayUpstream");
+    const view = await mount(api);
+    await view.selectPool();
+    const list = api.listGatewayPools;
+    const gate = new EventEmitter();
+    let checking = true;
+    api.listGatewayPools = async (profileId) => {
+      if (checking) {
+        checking = false;
+        await once(gate, "finish");
+      }
+      return list(profileId);
+    };
+    await act(async () => { button(view.container, "gateway.probeAll").click(); });
+    await view.hide();
+    await view.render("default");
+    await view.selectPool();
+    await act(async () => { gate.emit("finish"); });
+    expect(probe).not.toHaveBeenCalled();
+    expect(view.notices).toEqual([]);
+    expect(button(view.container, "gateway.probeAll").disabled).toBe(false);
   });
 
   it("does not attach a late probe result to edited credentials and clears it after saving", async () => {
@@ -683,6 +760,30 @@ describe("gateway upstream enabled draft", () => {
     return input;
   };
   const probeButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>(`button[aria-label='${i18n.t("gateway.probeUpstream")}']`)];
+
+  it("keeps the input node and keyboard focus while typing after reselecting the unchanged saved pool", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    const input = view.container.querySelector<HTMLInputElement>("input[name='upstreams.0.credentialId']")!;
+    await view.selectPool();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    for (const key of "XY") {
+      await act(async () => {
+        const focused = document.activeElement as HTMLInputElement;
+        focused.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(focused, focused.value + key);
+        focused.dispatchEvent(new InputEvent("input", { data: key, inputType: "insertText", bubbles: true }));
+        focused.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
+      });
+      expect(view.container.querySelector("input[name='upstreams.0.credentialId']")).toBe(input);
+      expect(document.activeElement).toBe(input);
+    }
+    expect(input.value).toBe("testXY");
+    expect((await api.listGatewayPools("default"))[0].upstreams[0].credentialId).toBe("test");
+  });
 
   it("keeps stable row identity and persists an all-disabled draft only on save, then applies a re-enabled draft on Start", async () => {
     const api = createMockApi();
