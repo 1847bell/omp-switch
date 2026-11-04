@@ -563,6 +563,7 @@ export type GatewayHealthState = "healthy" | "degraded" | "unhealthy" | "unteste
 
 export interface GatewayProbeRecord {
   id?: string;
+  profile: string;
   poolId: string;
   upstreamId: string;
   timestamp: string;

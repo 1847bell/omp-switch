@@ -522,6 +522,7 @@
   "gateway": {
     "poolIdVirtualModelRequired": "Gateway pool ID and virtual model cannot be empty",
     "poolSaved": "Gateway pool saved",
+    "saveHint": "Saving immediately applies changes to the running gateway for this profile. Stop the gateway before changing its port.",
     "readonly": "Current profile is read-only",
     "started": "Gateway started · 127.0.0.1:{{port}} · Bearer token required",
     "stopped": "Gateway stopped",

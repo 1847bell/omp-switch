@@ -335,8 +335,8 @@ describe("gateway routing", () => {
 
     // Healthy
     const healthyHistory = [
-      { poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:00:00Z", ok: true, status: 200, latencyMs: 120 },
-      { poolId: "p", upstreamId: "u", timestamp: "2026-08-24T07:59:00Z", ok: true, status: 200, latencyMs: 110 },
+      { profile: "default", poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:00:00Z", ok: true, status: 200, latencyMs: 120 },
+      { profile: "default", poolId: "p", upstreamId: "u", timestamp: "2026-08-24T07:59:00Z", ok: true, status: 200, latencyMs: 110 },
     ];
     expect(evaluateUpstreamHealth("p", "u", healthyHistory)).toMatchObject({
       healthState: "healthy",
@@ -347,7 +347,7 @@ describe("gateway routing", () => {
 
     // Degraded
     const degradedHistory = [
-      { poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:00:00Z", ok: true, status: 200, latencyMs: 950 },
+      { profile: "default", poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:00:00Z", ok: true, status: 200, latencyMs: 950 },
     ];
     expect(evaluateUpstreamHealth("p", "u", degradedHistory)).toMatchObject({
       healthState: "degraded",
@@ -357,8 +357,8 @@ describe("gateway routing", () => {
 
     // Unhealthy due to failures
     const unhealthyHistory = [
-      { poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:01:00Z", ok: false, status: 502, latencyMs: 3100, error: "HTTP 502" },
-      { poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:00:00Z", ok: false, status: 502, latencyMs: 3200, error: "HTTP 502" },
+      { profile: "default", poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:01:00Z", ok: false, status: 502, latencyMs: 3100, error: "HTTP 502" },
+      { profile: "default", poolId: "p", upstreamId: "u", timestamp: "2026-08-24T08:00:00Z", ok: false, status: 502, latencyMs: 3200, error: "HTTP 502" },
     ];
     expect(evaluateUpstreamHealth("p", "u", unhealthyHistory)).toMatchObject({
       healthState: "unhealthy",

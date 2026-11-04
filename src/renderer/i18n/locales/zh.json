@@ -522,6 +522,7 @@
   "gateway": {
     "poolIdVirtualModelRequired": "网关池 ID 和虚拟模型不能为空",
     "poolSaved": "网关池已保存",
+    "saveHint": "保存会立即应用到正在运行的同一 Profile。更改端口前请先停止网关。",
     "readonly": "当前 Profile 为只读",
     "started": "网关已启动 · 127.0.0.1:{{port}} · 需携带 Bearer token",
     "stopped": "网关已停止",

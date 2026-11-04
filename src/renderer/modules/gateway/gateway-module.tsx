@@ -44,7 +44,11 @@ function makeGatewayPool(profileId: string, providers: Array<[string, OmpProvide
   return { id: `pool-${Date.now().toString(36)}`, profile: profileId, virtualModel: "omp-switch/default", port: 46831, enabled: true, upstreams: [upstream] };
 }
 
-export function GatewayModule({ api, profileId, readOnly, onNotice, providers }: GatewayProps): ReactElement {
+export function GatewayModule(props: GatewayProps): ReactElement {
+  return <ProfileGatewayModule key={props.profileId} {...props} />;
+}
+
+function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }: GatewayProps): ReactElement {
   const { t } = useTranslation();
   const [pools, setPools] = useState<GatewayPool[]>([]);
   const [draft, setDraft] = useState<GatewayPool | null>(null);
@@ -61,7 +65,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
     try {
       setPools(await api.listGatewayPools(profileId));
       setStatus(await api.gatewayStatus());
-      const health = await api.gatewayHealth();
+      const health = await api.gatewayHealth(profileId);
       setHealthMap(health);
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
@@ -93,11 +97,11 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   async function saveDraft(): Promise<GatewayPool | null> {
-    if (!draft) return null;
+    if (!draft || draft.profile !== profileId) return null;
     if (!draft.id.trim() || !draft.virtualModel.trim()) return onNotice({ tone: "error", text: t("gateway.poolIdVirtualModelRequired") }), null;
     setLoading(true);
     try {
-      const saved = await api.saveGatewayPool({ ...draft, id: draft.id.trim(), virtualModel: draft.virtualModel.trim(), profile: profileId });
+      const saved = await api.saveGatewayPool({ ...draft, id: draft.id.trim(), virtualModel: draft.virtualModel.trim() });
       setPools((current) => [saved, ...current.filter((pool) => pool.id !== saved.id)]);
       setDraft(saved);
       onNotice({ tone: "success", text: t("gateway.poolSaved") });
@@ -136,7 +140,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
     try {
       const res = await api.probeGatewayUpstream(profileId, draft.id, upstream.id);
       setProbeResults((current) => ({ ...current, [upstream.id]: res }));
-      const updatedHealth = await api.gatewayHealth(draft.id);
+      const updatedHealth = await api.gatewayHealth(profileId, draft.id);
       setHealthMap((current) => ({ ...current, ...updatedHealth }));
       if (res.ok) {
         onNotice({ tone: "success", text: t("gateway.probeSuccess", { id: upstream.id, latency: res.latencyMs }) });
@@ -166,7 +170,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
           // continue
         }
       }
-      const updatedHealth = await api.gatewayHealth(draft.id);
+      const updatedHealth = await api.gatewayHealth(profileId, draft.id);
       setHealthMap((current) => ({ ...current, ...updatedHealth }));
       onNotice({ tone: "success", text: t("gateway.probeAllFinished", { count: draft.upstreams.length, ok: okCount }) });
     } catch (error) {
@@ -400,6 +404,7 @@ export function GatewayModule({ api, profileId, readOnly, onNotice, providers }:
                   </button>
                 )}
               </div>
+              <p className="muted-line">{t("gateway.saveHint")}</p>
               {token ? (
                 <label className="module-field">
                   <span>{t("gateway.bearerToken")}</span>

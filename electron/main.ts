@@ -38,7 +38,6 @@ import {
   parseJsonCliArguments,
   probeGatewayUpstream,
   runJsonCli,
-  validateGatewayPool,
   validateCatalogBundle,
   type GatewayUpstream,
 } from "@omp-switch/core";
@@ -48,6 +47,7 @@ import { blockRendererNavigation, denyRendererWindowOpen, getContentSecurityPoli
 import { createSecretCommand, provisionSecretBridge } from "./secret-bridge";
 import { createCredentialStore, type CredentialStore } from "./credential-store";
 import { SessionRefreshCoordinator, type RefreshExecution } from "./session-refresh-coordinator";
+import { GatewayConfigCoordinator } from "./gateway-config";
 import { launchCommandInTerminal } from "./terminal-launch";
 import { activeUpdateChecker, initUpdateChecker, openExternalAllowed } from "./update-checker";
 
@@ -61,6 +61,10 @@ let surfaces: OmpSurfaceAdapter;
 let promptLibrary: PromptLibraryService;
 let gateway: GatewayServer | null = null;
 let gatewayProfileId = "default";
+let gatewayPort: number | null = null;
+const gatewayConfig = new GatewayConfigCoordinator(() => gateway && gatewayPort !== null
+  ? { server: gateway, profile: gatewayProfileId, port: gatewayPort }
+  : null);
 let projectRoot = process.cwd();
 let projectRootExplicit = false;
 const currentDir = import.meta.dirname;
@@ -476,33 +480,19 @@ function registerIpc(): void {
     await metadata.setPreference("usage.pricing", overrides);
     return overrides;
   });
-  ipcMain.handle("gateway:list", (_event, profileId?: string) => metadata.listGatewayPools(profileId));
-  ipcMain.handle("gateway:save", async (_event, pool: GatewayPool) => {
-    validateGatewayPool(pool);
-    await metadata.saveGatewayPool(pool);
-    return pool;
+  ipcMain.handle("gateway:list", (_event, profileId: string) => metadata.listGatewayPools(safeSessionProfileId(profileId)));
+  ipcMain.handle("gateway:save", (_event, pool: GatewayPool) => {
+    safeSessionProfileId(pool.profile);
+    return gatewayConfig.save(metadata, pool);
   });
   ipcMain.handle("gateway:status", () => ({
     running: gateway?.running ?? false,
-    port: gateway?.running ? (metadata.getPreference<number>("gateway.port") ?? 46831) : null,
+    port: gateway?.running ? gatewayPort : null,
     upstreams: gateway?.getStats() ?? [],
   }));
-  ipcMain.handle("gateway:health", (_event, poolId?: string) => metadata.getGatewayHealth(poolId));
-  ipcMain.handle("gateway:probe", async (_event, arg1: string, arg2: string, arg3?: string | number, arg4?: number) => {
-    let profileId = gatewayProfileId;
-    let poolId: string;
-    let upstreamId: string;
-    let timeoutMs: number | undefined;
-    if (typeof arg3 === "string") {
-      profileId = safeSessionProfileId(arg1);
-      poolId = arg2;
-      upstreamId = arg3;
-      timeoutMs = typeof arg4 === "number" ? arg4 : undefined;
-    } else {
-      poolId = arg1;
-      upstreamId = arg2;
-      timeoutMs = typeof arg3 === "number" ? arg3 : undefined;
-    }
+  ipcMain.handle("gateway:health", (_event, profileId: string, poolId?: string) => metadata.getGatewayHealth(safeSessionProfileId(profileId), poolId));
+  ipcMain.handle("gateway:probe", async (_event, profile: string, poolId: string, upstreamId: string, timeoutMs?: number) => {
+    const profileId = safeSessionProfileId(profile);
     const pools = metadata.listGatewayPools(profileId);
     const pool = pools.find((candidate) => candidate.id === poolId);
     if (!pool) throw new Error("Unknown gateway pool");
@@ -511,6 +501,7 @@ function registerIpc(): void {
     const forwarder = await resolveGatewayForwarder(profileId);
     const result = await probeGatewayUpstream(upstream, forwarder, { timeoutMs });
     await metadata.recordGatewayProbe({
+      profile: profileId,
       poolId,
       upstreamId,
       timestamp: new Date().toISOString(),
@@ -523,10 +514,11 @@ function registerIpc(): void {
   });
 
   ipcMain.handle("gateway:start", async (_event, profileId: string) => startGateway(profileId));
-  ipcMain.handle("gateway:stop", async () => {
+  ipcMain.handle("gateway:stop", () => gatewayConfig.runExclusive(async () => {
     await gateway?.stop();
     gateway = null;
-  });
+    gatewayPort = null;
+  }));
   ipcMain.handle("omp:update", (_event, profileId: string = "default") => runOmpUpdate(profileId));
   ipcMain.handle("secret:put", async (_event, input: { id?: string; label: string; value: string }) => {
     if (!input || typeof input !== "object") throw new Error("Secret input must be an object");
@@ -605,18 +597,28 @@ async function resolveGatewayForwarder(profileId: string) {
   };
 }
 
-async function startGateway(profileId: string): Promise<{ running: boolean; port: number; token: string }> {
+function startGateway(profile: string): Promise<{ running: boolean; port: number; token: string }> {
+  const profileId = safeSessionProfileId(profile);
+  return gatewayConfig.runExclusive(() => startGatewayNow(profileId));
+}
+
+async function startGatewayNow(profileId: string): Promise<{ running: boolean; port: number; token: string }> {
+  if (gateway && gatewayProfileId !== profileId) {
+    throw new Error("Stop the gateway before starting a different profile");
+  }
   const pools = metadata.listGatewayPools(profileId).filter((pool) => pool.enabled);
   if (pools.length === 0) throw new Error("No enabled gateway pools exist for this profile");
   const port = pools[0]?.port ?? metadata.getPreference<number>("gateway.port") ?? 46831;
-  gatewayProfileId = profileId;
   const token = await loadGatewayToken();
   const forwarder = await resolveGatewayForwarder(profileId);
   if (!gateway) {
+    // Retain ownership even if binding fails: another profile must stop this instance first.
+    gatewayProfileId = profileId;
     gateway = new GatewayServer({
       resolve: forwarder.resolve,
       onAttempt: (observation) => {
         void metadata.recordGatewayProbe({
+          profile: profileId,
           poolId: observation.poolId,
           upstreamId: observation.upstreamId,
           timestamp: new Date().toISOString(),
@@ -631,6 +633,7 @@ async function startGateway(profileId: string): Promise<{ running: boolean; port
     gateway.setPools(pools);
   }
   const boundPort = await gateway.start(port);
+  gatewayPort = boundPort;
   await metadata.setPreference("gateway.port", boundPort);
   return { running: true, port: boundPort, token };
 }

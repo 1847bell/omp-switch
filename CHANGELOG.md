@@ -6,6 +6,8 @@
 - Creating the first gateway pool now opens its draft editor instead of leaving the empty state visible. Closing an unsaved first pool returns to the empty state.
 - Gateway drafts use the full editor width when no pools exist. Upstream fields adapt to the editor width, with grouped health/probe/delete controls that stay inside the panel on narrow windows.
 - Gateway Chat/Responses requests no longer treat a completed upload as client cancellation. Actual disconnects cancel pending upstream requests and release relayed response streams.
+- Gateway pools and health history are isolated by profile, including equal pool IDs. Existing metadata is migrated without assigning ambiguous legacy probe records to a profile, and changing profiles clears the previous editor state.
+- Saving a running gateway pool now applies its model and upstream routing changes before reporting success. Live port changes and cross-profile starts require stopping first; save/start/stop operations are serialized to prevent stale configuration from being applied.
 
 ## 1.0.2 - 2026-11-02
 

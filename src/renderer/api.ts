@@ -3,6 +3,7 @@ import type {
   ConfigPatch,
   DiscoveryResult,
   EffectiveConfig,
+  GatewayPool,
   McpConfigFile,
   McpConfigPreview,
   PatchPreview,
@@ -17,6 +18,8 @@ import i18n from "./i18n";
 export function createMockApi(): NonNullable<Window["ompSwitch"]> {
   const memory: Record<string, EffectiveConfig> = {};
   const mcpFiles = new Map<string, McpConfigFile>();
+  const gatewayPools = new Map<string, Map<string, GatewayPool>>();
+  let runningGateway: { profile: string; port: number } | null = null;
   let mcpRevision = 0;
   const sessionProfiles = new Map<string, SessionSummary[]>();
   const getSessions = (profileId: string): SessionSummary[] => {
@@ -331,13 +334,27 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       };
     },
     setUsagePrice: async () => ({}),
-    listGatewayPools: async () => [],
-    saveGatewayPool: async (pool) => pool,
-    gatewayStatus: async () => ({ running: false, port: null, upstreams: [] }),
-    gatewayHealth: async () => ({}),
-    probeGatewayUpstream: async () => ({ ok: true, status: 200, latencyMs: 115 }),
-    startGateway: async () => ({ running: true, port: 46831, token: "demo-gateway-token" }),
-    stopGateway: async () => undefined,
+    listGatewayPools: async (profileId) => structuredClone([...gatewayPools.get(profileId)?.values() ?? []]),
+    saveGatewayPool: async (pool) => {
+      if (runningGateway?.profile === pool.profile && pool.port !== runningGateway.port) {
+        throw new Error("Stop the gateway before changing its port");
+      }
+      const pools = gatewayPools.get(pool.profile) ?? new Map<string, GatewayPool>();
+      pools.set(pool.id, structuredClone(pool));
+      gatewayPools.set(pool.profile, pools);
+      return structuredClone(pool);
+    },
+    gatewayStatus: async () => ({ running: runningGateway !== null, port: runningGateway?.port ?? null, upstreams: [] }),
+    gatewayHealth: async (_profileId, _poolId) => ({}),
+    probeGatewayUpstream: async (_profileId, _poolId, _upstreamId, _timeoutMs) => ({ ok: true, status: 200, latencyMs: 115 }),
+    startGateway: async (profileId) => {
+      if (runningGateway && runningGateway.profile !== profileId) throw new Error("Stop the gateway before starting another profile");
+      const pool = [...gatewayPools.get(profileId)?.values() ?? []].find((candidate) => candidate.enabled);
+      if (!pool) throw new Error("No enabled gateway pools exist for this profile");
+      runningGateway = { profile: profileId, port: pool.port };
+      return { running: true, port: pool.port, token: "demo-gateway-token" };
+    },
+    stopGateway: async () => { runningGateway = null; },
     updateOmp: async () => ({ ok: false, output: "Demo mode" }),
   };
 }

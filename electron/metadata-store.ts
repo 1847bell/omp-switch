@@ -18,7 +18,7 @@ interface MetadataState {
   providerLabels: Record<string, string>;
   snapshots: Array<Record<string, unknown>>;
   gatewayPools: GatewayPool[];
-  gatewayProbeHistory: GatewayProbeRecord[];
+  gatewayProbeHistory: Array<Omit<GatewayProbeRecord, "profile"> & { profile?: string }>;
   sessionCaches: SessionFileCache[];
   preferences: Record<string, unknown>;
 }
@@ -97,23 +97,33 @@ export class MetadataStore {
   }
 
   async init(): Promise<void> {
+    if (this.sqlite) return;
     if (this.backend === "json") {
       await this.loadFallback();
       return;
     }
+    let DatabaseSync: new (filePath: string) => SqliteDb;
     try {
-      const sqlite = await import("node:sqlite");
-      this.sqlite = new sqlite.DatabaseSync(this.filePath) as unknown as SqliteDb;
+      // node:sqlite is unavailable on older Electron/Node runtimes.
+      DatabaseSync = (await import("node:sqlite")).DatabaseSync as unknown as typeof DatabaseSync;
+    } catch {
+      await this.loadFallback();
+      return;
+    }
+    try {
+      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+      this.sqlite = new DatabaseSync(this.filePath);
       this.sqlite.exec(
         "CREATE TABLE IF NOT EXISTS provider_meta (provider_id TEXT PRIMARY KEY, label TEXT NOT NULL);"
         + "CREATE TABLE IF NOT EXISTS snapshots (id TEXT PRIMARY KEY, profile TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL);"
-        + "CREATE TABLE IF NOT EXISTS gateway_pools (id TEXT PRIMARY KEY, profile TEXT NOT NULL, payload TEXT NOT NULL);"
-        + "CREATE TABLE IF NOT EXISTS gateway_probe_history (id TEXT PRIMARY KEY, pool_id TEXT NOT NULL, upstream_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL);"
+        + "CREATE TABLE IF NOT EXISTS gateway_pools (id TEXT NOT NULL, profile TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(profile, id));"
+        + "CREATE TABLE IF NOT EXISTS gateway_probe_history (id TEXT PRIMARY KEY, profile TEXT, pool_id TEXT NOT NULL, upstream_id TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL);"
         + "CREATE TABLE IF NOT EXISTS preferences (key TEXT PRIMARY KEY, payload TEXT NOT NULL);"
         + "CREATE TABLE IF NOT EXISTS session_cache (id TEXT PRIMARY KEY, profile TEXT NOT NULL, relative_path TEXT NOT NULL, payload TEXT NOT NULL);"
         + "CREATE TABLE IF NOT EXISTS session_usage (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, profile TEXT NOT NULL, payload TEXT NOT NULL);"
         + "DROP TABLE IF EXISTS session_index;",
       );
+      this.migrateGatewayState();
       try {
         this.sqlite.exec("CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(session_id UNINDEXED, profile UNINDEXED, role, text);");
         this.hasFts = true;
@@ -121,10 +131,10 @@ export class MetadataStore {
         this.hasFts = false;
       }
       this.removeLegacySessionOffsets();
-    } catch {
+    } catch (error) {
       this.sqlite?.close();
       this.sqlite = null;
-      await this.loadFallback();
+      throw error;
     }
   }
 
@@ -134,6 +144,40 @@ export class MetadataStore {
       this.sqlite.close();
     } finally {
       this.sqlite = null;
+    }
+  }
+
+  private migrateGatewayState(): void {
+    if (!this.sqlite) return;
+    const db = this.sqlite;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const poolColumns = db.prepare("PRAGMA table_info(gateway_pools)").all() as Array<{ name: string; pk: number }>;
+      if (!poolColumns.some((column) => column.name === "profile" && column.pk > 0)) {
+        db.exec(
+          "CREATE TABLE gateway_pools_migrated (id TEXT NOT NULL, profile TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(profile, id));"
+          + "INSERT INTO gateway_pools_migrated(id, profile, payload) SELECT id, profile, payload FROM gateway_pools;"
+          + "DROP TABLE gateway_pools; ALTER TABLE gateway_pools_migrated RENAME TO gateway_pools;",
+        );
+      }
+      const historyColumns = db.prepare("PRAGMA table_info(gateway_probe_history)").all() as Array<{ name: string }>;
+      if (!historyColumns.some((column) => column.name === "profile")) {
+        db.exec("ALTER TABLE gateway_probe_history ADD COLUMN profile TEXT");
+      }
+      const rows = db.prepare("SELECT id, pool_id, payload FROM gateway_probe_history WHERE profile IS NULL").all() as Array<{ id: string; pool_id: string; payload: string }>;
+      const owners = db.prepare("SELECT DISTINCT profile FROM gateway_pools WHERE id = ?");
+      const update = db.prepare("UPDATE gateway_probe_history SET profile = ?, payload = ? WHERE id = ?");
+      for (const row of rows) {
+        const record = JSON.parse(row.payload) as Omit<GatewayProbeRecord, "profile"> & { profile?: string };
+        const profiles = owners.all(row.pool_id) as Array<{ profile: string }>;
+        // Empty profile permanently quarantines unresolved legacy ownership; valid profiles are nonempty.
+        const profile = record.profile ?? (profiles.length === 1 ? profiles[0].profile : "");
+        update.run(profile, JSON.stringify({ ...record, profile }), row.id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
   }
 
@@ -165,6 +209,7 @@ export class MetadataStore {
 
   private async loadFallback(): Promise<void> {
     const empty = emptyState();
+    let needsPersistence = false;
     try {
       const parsed = JSON.parse(await fs.readFile(this.filePath + ".json", "utf8")) as Record<string, unknown>;
       const isCurrent = parsed.version === 3 && Array.isArray(parsed.sessionCaches);
@@ -179,10 +224,20 @@ export class MetadataStore {
         sessionCaches: isCurrent ? (rawCaches as SessionFileCache[]).map(cloneCache) : [],
         preferences: asObject(parsed.preferences) ?? {},
       };
-      if (!isCurrent || "sessionIndex" in parsed || hasLegacyCacheFields) await this.persistFallback();
+      let migratedHistory = false;
+      for (const record of this.fallback.gatewayProbeHistory) {
+        if (record.profile !== undefined) continue;
+        const owners = new Set(this.fallback.gatewayPools.filter((pool) => pool.id === record.poolId).map((pool) => pool.profile));
+        // Persist unresolved ownership too, so a newly created pool cannot inherit old probes.
+        record.profile = owners.size === 1 ? owners.values().next().value! : "";
+        migratedHistory = true;
+      }
+      needsPersistence = !isCurrent || "sessionIndex" in parsed || hasLegacyCacheFields || migratedHistory;
     } catch {
       this.fallback = empty;
     }
+    // Migration write errors must propagate without replacing the loaded state with an empty store.
+    if (needsPersistence) await this.persistFallback();
   }
 
   async setProviderLabel(providerId: string, label: string): Promise<void> {
@@ -242,10 +297,10 @@ export class MetadataStore {
 
   async saveGatewayPool(pool: GatewayPool): Promise<void> {
     if (this.sqlite) {
-      this.sqlite.prepare("INSERT INTO gateway_pools(id, profile, payload) VALUES(?, ?, ?) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile, payload=excluded.payload").run(pool.id, pool.profile, JSON.stringify(pool));
+      this.sqlite.prepare("INSERT INTO gateway_pools(id, profile, payload) VALUES(?, ?, ?) ON CONFLICT(profile, id) DO UPDATE SET payload=excluded.payload").run(pool.id, pool.profile, JSON.stringify(pool));
       return;
     }
-    this.fallback.gatewayPools = [pool, ...this.fallback.gatewayPools.filter((item) => item.id !== pool.id)];
+    this.fallback.gatewayPools = [pool, ...this.fallback.gatewayPools.filter((item) => item.id !== pool.id || item.profile !== pool.profile)];
     await this.persistFallback();
   }
 
@@ -263,46 +318,47 @@ export class MetadataStore {
     const item: GatewayProbeRecord = { ...record, id };
     if (this.sqlite) {
       this.sqlite.prepare(
-        "INSERT INTO gateway_probe_history(id, pool_id, upstream_id, created_at, payload) VALUES(?, ?, ?, ?, ?)"
-      ).run(id, item.poolId, item.upstreamId, item.timestamp, JSON.stringify(item));
+        "INSERT INTO gateway_probe_history(id, profile, pool_id, upstream_id, created_at, payload) VALUES(?, ?, ?, ?, ?, ?)"
+      ).run(id, item.profile, item.poolId, item.upstreamId, item.timestamp, JSON.stringify(item));
       this.sqlite.prepare(
-        "DELETE FROM gateway_probe_history WHERE pool_id = ? AND upstream_id = ? AND id NOT IN (SELECT id FROM gateway_probe_history WHERE pool_id = ? AND upstream_id = ? ORDER BY created_at DESC LIMIT ?)"
-      ).run(item.poolId, item.upstreamId, item.poolId, item.upstreamId, PROBE_HISTORY_RETENTION);
+        "DELETE FROM gateway_probe_history WHERE profile = ? AND pool_id = ? AND upstream_id = ? AND id NOT IN (SELECT id FROM gateway_probe_history WHERE profile = ? AND pool_id = ? AND upstream_id = ? ORDER BY created_at DESC LIMIT ?)"
+      ).run(item.profile, item.poolId, item.upstreamId, item.profile, item.poolId, item.upstreamId, PROBE_HISTORY_RETENTION);
       return;
     }
     const current = this.fallback.gatewayProbeHistory ?? [];
     const updated = [item, ...current.filter((entry) => entry.id !== id)];
-    const matching = updated.filter((entry) => entry.poolId === item.poolId && entry.upstreamId === item.upstreamId).slice(0, PROBE_HISTORY_RETENTION);
-    const others = updated.filter((entry) => !(entry.poolId === item.poolId && entry.upstreamId === item.upstreamId));
+    const matching = updated.filter((entry) => entry.profile === item.profile && entry.poolId === item.poolId && entry.upstreamId === item.upstreamId).sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, PROBE_HISTORY_RETENTION);
+    const others = updated.filter((entry) => !(entry.profile === item.profile && entry.poolId === item.poolId && entry.upstreamId === item.upstreamId));
     this.fallback.gatewayProbeHistory = [...matching, ...others];
     await this.persistFallback();
   }
 
-  listGatewayProbeHistory(poolId?: string, upstreamId?: string): GatewayProbeRecord[] {
+  listGatewayProbeHistory(profile: string, poolId?: string, upstreamId?: string): GatewayProbeRecord[] {
     if (this.sqlite) {
-      let query = "SELECT payload FROM gateway_probe_history";
-      const params: string[] = [];
-      if (poolId && upstreamId) {
-        query += " WHERE pool_id = ? AND upstream_id = ? ORDER BY created_at DESC";
-        params.push(poolId, upstreamId);
-      } else if (poolId) {
-        query += " WHERE pool_id = ? ORDER BY created_at DESC";
+      let query = "SELECT payload FROM gateway_probe_history WHERE profile = ?";
+      const params: string[] = [profile];
+      if (poolId) {
+        query += " AND pool_id = ?";
         params.push(poolId);
-      } else {
-        query += " ORDER BY created_at DESC";
       }
+      if (upstreamId) {
+        query += " AND upstream_id = ?";
+        params.push(upstreamId);
+      }
+      query += " ORDER BY created_at DESC";
       const rows = this.sqlite.prepare(query).all(...params) as Array<{ payload: string }>;
       return rows.map((row) => JSON.parse(row.payload) as GatewayProbeRecord);
     }
-    return (this.fallback.gatewayProbeHistory ?? []).filter((entry) => {
+    return this.fallback.gatewayProbeHistory.filter((entry): entry is GatewayProbeRecord => {
+      if (entry.profile !== profile) return false;
       if (poolId && entry.poolId !== poolId) return false;
       if (upstreamId && entry.upstreamId !== upstreamId) return false;
       return true;
     }).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   }
 
-  getGatewayHealth(poolId?: string): Record<string, GatewayUpstreamHealth> {
-    const history = this.listGatewayProbeHistory(poolId);
+  getGatewayHealth(profile: string, poolId?: string): Record<string, GatewayUpstreamHealth> {
+    const history = this.listGatewayProbeHistory(profile, poolId);
     const byUpstream: Record<string, GatewayProbeRecord[]> = {};
     for (const record of history) {
       const key = `${record.poolId}:${record.upstreamId}`;

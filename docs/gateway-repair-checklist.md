@@ -5,12 +5,12 @@
 
 ## 续接上下文
 
-- 当前 G01 修复分支：`fix/gateway-g01`，从已合并前序修复的 `fork/maintenance` 创建。后续开始前重新确认当前分支与工作区状态。
+- 当前 G02/G03 修复分支：`fix/gateway-g02-g03`，从 G01 提交 `27f475c` 创建；G01 位于 `fix/gateway-g01`，尚未合并至维护分支，未推送。
 - 前序已修复：首次新建网关池后编辑器不可见；无池时左侧空栏；上游控件溢出、错位和窄窗口布局。
 - 前序新建/布局修复及本清单已通过 `0cd838b` 提交，并快进合并至 `fork/maintenance`，未推送。不要覆盖这些工作或其他用户改动。
 - 先前发现 `.codegraph/`、`sync/` 为未跟踪内容，不属于本次修复，不要顺手提交或删除。
 - 本清单记录前序审计，不代表后续代码未变化。文件行号均为审计时位置，修复时以符号及当前源码为准。
-- G01 已修复并完成真实 HTTP 烟测；其余未勾选项尚未完成，G05 的剩余边界见该项说明。
+- G01、G02、G03 已修复；G02/G03 随本次提交记录。其余未勾选项保持待修复，G04/G05 的已收紧边界及剩余事项见对应条目。
 
 ## 证据等级
 
@@ -34,21 +34,26 @@
 
 ### G02 Profile 切换保留旧草稿，保存可移动原池
 
-- [ ] 明确草稿所属 Profile，阻止旧草稿保存到新 Profile。
-- [ ] 为池的持久化标识建立 Profile 隔离，迁移现有 SQLite/JSON 数据，避免同名 ID 跨 Profile 覆盖。
-- 证据：**实测确认**。
+- [x] 明确草稿所属 Profile，阻止旧草稿保存到新 Profile。
+- [x] 为池的持久化标识建立 Profile 隔离，迁移现有 SQLite/JSON 数据，避免同名 ID 跨 Profile 覆盖。
+- 修复前证据：**实测确认**。
   - 在 Default 编辑草稿，切到 Work，页面标题已变为 Work，但仍显示 Default 草稿。
   - SQLite、JSON 后端保存相同池 ID 到 Work 后，Default 的池列表变空。
 - 位置：`gateway-module.tsx` 的 Profile effect / `saveDraft`（约 73、100 行）；`electron/metadata-store.ts` 的表结构、`saveGatewayPool`、`listGatewayPools`（约 110、243–258 行）。
 - 原因：Profile 变化只刷新列表，未隔离草稿；保存强制使用当前 `profileId`；数据库以池 ID 为全局主键，JSON 同样按 ID 去重。
 - 验收：两个 Profile 可各自保存同名池且不互相覆盖；切换 Profile 后旧草稿不能写入新 Profile；迁移前数据保留；健康记录也不能跨 Profile 混合。两个持久化后端均需验证。
+- 修复：Profile 切换时重新挂载编辑状态，保存保留草稿原 Profile；列表、健康、探测 IPC 使用显式 Profile。SQLite 改为 `(profile, id)` 联合主键；JSON 按相同联合身份更新。探测记录和保留上限按 Profile 隔离。
+- 迁移：保留旧池及健康记录；只能从唯一池所有者推断旧记录归属。无法确定的记录永久隔离，不因后来创建同名池而重新归属；迁移失败显式报错，不降级为空数据。
+- 验证：SQLite/JSON 的同名池、更新/重开、旧数据迁移、未归属记录、健康隔离及回滚均有通过的行为回归；浏览器预览已验证 Default→Work→Default 的同名池不覆盖，旧草稿、Token 不串入新页；延迟保存/刷新结果也有 UI 回归。
 
 ### G03 运行中保存不会更新活动配置
 
-- [ ] 建立明确的保存/应用语义，避免“保存成功”但实际服务继续旧路由。
-- 证据：**代码确认**。`gateway:save` 仅调用 `metadata.saveGatewayPool`，未更新活动 `GatewayServer`。
+- [x] 建立明确的保存/应用语义，避免“保存成功”但实际服务继续旧路由。
+- 修复前证据：**代码确认**。`gateway:save` 仅调用 `metadata.saveGatewayPool`，未更新活动 `GatewayServer`。
 - 位置：`electron/main.ts` 约 480–483 行；`gateway-module.tsx` 的 `saveDraft`、启动/停止按钮。
 - 验收：运行中修改虚拟模型、上游、顺序或启用状态后，实际新请求与界面显示的应用状态一致；不再静默继续使用旧配置。端口更改与 G11 一起明确。
+- 修复：`GatewayConfigCoordinator` 将保存、启动、停止串行化；保存完成前将同一运行 Profile 的最新启用池应用到服务。不自动启动已停止服务，也不更新其他 Profile 的活动路由。运行中修改端口在持久化前拒绝，要求先停止；跨 Profile 启动同样要求先停止。
+- 验证：生产保存入口的真实 HTTP 回归与独立烟测确认虚拟模型重命名、上游更换/排序/启停、最后一池禁用后再启用、其他 Profile 保存隔离、停止后保存、端口拒绝及并发操作。
 
 ### G04 复用服务时仍保留旧 Profile 的 resolver
 
@@ -57,6 +62,7 @@
 - 位置：`electron/main.ts` 的 `resolveGatewayForwarder`、`startGateway`，约 593–635 行；`GatewayServer` 构造函数。
 - 影响：复用实例后可能仍使用旧 Profile 的供应商地址、请求头和凭据引用；界面当前 Profile 与全局运行状态归属不明确。
 - 验收：Default/Work 使用相同 provider ID、不同本地上游和测试凭据，切换运行目标后请求只到正确上游；状态明确标识活动 Profile；停止操作的作用对象明确；失败切换不留下错误的状态归属。
+- G02/G03 已禁止已有实例跨 Profile 复用，必须先停止，避免旧 resolver 和健康归属串用。完整活动 Profile 状态展示、停止对象说明及 Profile 热切换语义仍未完成，本项不勾选。
 
 ## 第二组：转发与资源生命周期（P2）
 
@@ -152,4 +158,13 @@ G01 → G02/G04 → G03/G11 → G05/G06/G07 → G08/G09/G10 → G12。
 
 | 项目 | 改动文件/提交 | 实际验证 | 仍有限制 |
 | --- | --- | --- | --- |
-| G01 | `packages/core/src/gateway.ts`、`gateway.test.ts`、`CHANGELOG.md` | 网关专项 19 项通过；类型检查及生产构建通过；全量 420 通过、5 跳过、2 项因既有 Windows 符号链接 EPERM 失败；独立 HTTP 烟测确认 Chat/Responses 200、模型替换、完整 SSE/DONE、503→下一上游 200、无 Token 401、Origin 403 | G05 的直接转发 signal 取消与响应体超时未完成；其他未勾选项保持待修复 |
+| G01 | `27f475c`；`packages/core/src/gateway.ts`、`gateway.test.ts`、`CHANGELOG.md` | 网关专项 19 项通过；类型检查及生产构建通过；全量 420 通过、5 跳过、2 项因既有 Windows 符号链接 EPERM 失败；独立 HTTP 烟测确认 Chat/Responses 200、模型替换、完整 SSE/DONE、503→下一上游 200、无 Token 401、Origin 403 | G05 的直接转发 signal 取消与响应体超时未完成；其他未勾选项保持待修复 |
+| G02 | `electron/metadata-store.ts`、`domain.ts`、网关组件、IPC/preload/global/mock 及行为测试 | SQLite/JSON 同名池、旧数据迁移/回滚、永久隔离未知健康记录、重开及 UI 异步切换回归通过；浏览器预览确认同名池往返切换、旧草稿/Token 隔离 | 旧记录无法确定的归属不猜测，保留但不显示于任一有效 Profile；全局活动 Profile 状态展示仍属于 G04 |
+| G03 | `electron/gateway-config.ts`、`electron/main.ts`、网关保存说明及真实 HTTP 测试 | 两个后端通过生产保存入口的真实 HTTP 路由变更、启停、其他 Profile 隔离、端口拒绝、并发保存/启动/停止回归与独立烟测 | 活动端口修改及跨 Profile 启动必须先停止；G04/G11 剩余事项未勾选 |
+
+### G02/G03 本轮验证
+
+- 关联专项与受影响提示词库服务共 **77 项通过**；类型检查、最终生产构建通过。
+- 最终全量测试：**440 通过、5 跳过、2 失败**。仅保留既有 `packages/core/src/prompt-library.test.ts` 的 Windows 符号链接 `EPERM`；本轮最初发现的 7 项新目录打开 SQLite 失败已通过在初始化前创建目录修复，未隐藏或跳过测试。
+- 独立 Node HTTP 烟测在新建的隔离数据目录中分别使用 SQLite/JSON，确认保存即应用、模型替换、禁用/再启用、不影响其他 Profile、拒绝活动端口更改，以及停止后保存和重开数据保留；临时目录已清理。
+- 浏览器预览仅用于 UI 状态切换验证；真实 HTTP 证明来自生产保存协调器和真实网关服务，未声称启动完整 Electron IPC 会话。
