@@ -10,6 +10,7 @@
 - Saving a running gateway pool now applies its model and upstream routing changes before reporting success. Live port changes require stopping first; save/start/stop operations are serialized to prevent stale configuration from being applied.
 - Same-port gateway Profile switches replace the resolver, credentials, pools and runtime ownership together. In-flight requests retain their original Profile, and failed switches preserve the active service. Status and stop controls identify the active Profile; stale stop requests cannot stop a newly selected Profile.
 - JSON metadata commits are serialized so request history cannot race with gateway configuration writes. Gateway stop waits for pending history commits before completing.
+- Gateway cancellation and idle timeouts remain active through response-body consumption. Response headers and body chunks renew the idle deadline, allowing healthy SSE streams to continue; stalled or cancelled streams release the upstream without failover or a second response.
 
 ## 1.0.2 - 2026-11-02
 

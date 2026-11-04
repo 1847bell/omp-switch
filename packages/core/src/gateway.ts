@@ -12,7 +12,7 @@ import type {
 
 export const DEFAULT_GATEWAY_PORT = 46831;
 
-/** Upstream requests are aborted after this long; OMP's own gateway allows 255s of idle. */
+/** Default per-attempt idle deadline, renewed on response headers and each body chunk. */
 export const DEFAULT_GATEWAY_UPSTREAM_TIMEOUT_MS = 255_000;
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -85,6 +85,7 @@ export interface ResolvedGatewayUpstream {
 export interface GatewayForwarder {
   resolve(upstream: GatewayUpstream): Promise<ResolvedGatewayUpstream>;
   fetchImpl?: typeof fetch;
+  /** Idle deadline while awaiting headers or more response bytes, not a total stream duration. */
   timeoutMs?: number;
   /** Called once per attempt so the caller can surface latency and failure counts. */
   onAttempt?(observation: { poolId: string; upstreamId: string; status?: number; latencyMs: number; error?: string }): void;
@@ -208,6 +209,57 @@ export function isRetryableGatewayStatus(status: number | undefined): boolean {
   return status === undefined || status === 408 || status === 429 || status >= 500;
 }
 
+function managedGatewayResponse(response: Response, signal: AbortSignal, renewTimeout: () => void, cleanup: () => void): Response {
+  const reader = response.body!.getReader();
+  let finished = false;
+  let streamController: ReadableStreamDefaultController<Uint8Array>;
+  const finish = () => {
+    finished = true;
+    signal.removeEventListener("abort", onAbort);
+    cleanup();
+  };
+  const cancel = (reason: unknown) => {
+    finish();
+    return reader.cancel(reason).finally(() => reader.releaseLock());
+  };
+  const onAbort = () => {
+    if (finished) return;
+    streamController.error(signal.reason);
+    // Native fetch may already have errored its body. Disposal must not create a second rejection.
+    void cancel(signal.reason).catch(() => undefined);
+  };
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      else renewTimeout();
+    },
+    async pull(controller) {
+      if (finished) return;
+      try {
+        const chunk = await reader.read();
+        if (finished) return;
+        if (chunk.done) {
+          finish();
+          reader.releaseLock();
+          controller.close();
+        } else {
+          renewTimeout();
+          controller.enqueue(chunk.value);
+        }
+      } catch (error) {
+        if (finished) return;
+        finish();
+        reader.releaseLock();
+        controller.error(error);
+      }
+    },
+    cancel,
+  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
 export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayRequest, forwarder: GatewayForwarder): Promise<Response> {
   const candidates = pool.upstreams.filter((upstream) => upstream.enabled);
   if (candidates.length === 0) return new Response(JSON.stringify({ error: { message: "No enabled upstreams" } }), { status: 503, headers: { "content-type": "application/json" } });
@@ -220,8 +272,16 @@ export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayR
     }
     const startedAt = Date.now();
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onAbort = () => controller.abort();
+    const timer = setTimeout(() => controller.abort(new DOMException(`Upstream idle timeout after ${timeoutMs}ms`, "TimeoutError")), timeoutMs);
+    timer.unref();
+    const renewTimeout = () => { timer.refresh(); };
+    const onAbort = () => controller.abort(request.signal?.reason);
+    const cleanup = () => {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", onAbort);
+    };
+    let bodyOwnsLifecycle = false;
+    renewTimeout();
     request.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const resolved = await forwarder.resolve(upstream);
@@ -235,21 +295,25 @@ export async function forwardGatewayRequest(pool: GatewayPool, request: GatewayR
         signal: controller.signal,
       });
       forwarder.onAttempt?.({ poolId: pool.id, upstreamId: upstream.id, status: response.status, latencyMs: Date.now() - startedAt });
-      if (!isRetryableGatewayStatus(response.status) || upstream === candidates[candidates.length - 1] || request.signal?.aborted) return response;
+      if (!isRetryableGatewayStatus(response.status) || upstream === candidates[candidates.length - 1] || request.signal?.aborted) {
+        if (!response.body) return response;
+        const managed = managedGatewayResponse(response, controller.signal, renewTimeout, cleanup);
+        bodyOwnsLifecycle = true;
+        return managed;
+      }
       lastError = new Error(`Upstream returned HTTP ${response.status}`);
     } catch (error) {
       if (request.signal?.aborted) {
         return new Response(JSON.stringify({ error: { message: "Client cancelled request" } }), { status: 499, headers: { "content-type": "application/json" } });
       }
-      const message = (error as Error)?.name === "AbortError"
+      const message = controller.signal.aborted
         ? `Upstream did not respond within ${timeoutMs}ms`
         : error instanceof Error ? error.message : String(error);
       lastError = new Error(message);
       forwarder.onAttempt?.({ poolId: pool.id, upstreamId: upstream.id, latencyMs: Date.now() - startedAt, error: message });
       if (upstream === candidates[candidates.length - 1]) break;
     } finally {
-      clearTimeout(timer);
-      request.signal?.removeEventListener("abort", onAbort);
+      if (!bodyOwnsLifecycle) cleanup();
     }
   }
   const message = lastError instanceof Error ? lastError.message : "Gateway upstream request failed";
