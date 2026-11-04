@@ -5,12 +5,12 @@
 
 ## 续接上下文
 
-- 当前 G02/G03 修复分支：`fix/gateway-g02-g03`，从 G01 提交 `27f475c` 创建；G01 位于 `fix/gateway-g01`，尚未合并至维护分支，未推送。
+- 当前 G04 修复分支：`fix/gateway-g04`，从 G02/G03 提交 `0144a8a` 创建；G01 为 `27f475c`。这些修复尚未合并至维护分支，未推送。
 - 前序已修复：首次新建网关池后编辑器不可见；无池时左侧空栏；上游控件溢出、错位和窄窗口布局。
 - 前序新建/布局修复及本清单已通过 `0cd838b` 提交，并快进合并至 `fork/maintenance`，未推送。不要覆盖这些工作或其他用户改动。
 - 先前发现 `.codegraph/`、`sync/` 为未跟踪内容，不属于本次修复，不要顺手提交或删除。
 - 本清单记录前序审计，不代表后续代码未变化。文件行号均为审计时位置，修复时以符号及当前源码为准。
-- G01、G02、G03 已修复；G02/G03 随本次提交记录。其余未勾选项保持待修复，G04/G05 的已收紧边界及剩余事项见对应条目。
+- G01、G02、G03 已提交；G04 已修复并完成真实 HTTP、浏览器、专项、类型检查及构建验证，随本次提交记录。其余未勾选项保持待修复。
 
 ## 证据等级
 
@@ -52,17 +52,20 @@
 - 修复前证据：**代码确认**。`gateway:save` 仅调用 `metadata.saveGatewayPool`，未更新活动 `GatewayServer`。
 - 位置：`electron/main.ts` 约 480–483 行；`gateway-module.tsx` 的 `saveDraft`、启动/停止按钮。
 - 验收：运行中修改虚拟模型、上游、顺序或启用状态后，实际新请求与界面显示的应用状态一致；不再静默继续使用旧配置。端口更改与 G11 一起明确。
-- 修复：`GatewayConfigCoordinator` 将保存、启动、停止串行化；保存完成前将同一运行 Profile 的最新启用池应用到服务。不自动启动已停止服务，也不更新其他 Profile 的活动路由。运行中修改端口在持久化前拒绝，要求先停止；跨 Profile 启动同样要求先停止。
+- 修复：`GatewayConfigCoordinator` 将保存、启动、停止串行化；保存完成前将同一运行 Profile 的最新启用池应用到服务。不自动启动已停止服务，也不更新其他 Profile 的活动路由。运行中修改端口在持久化前拒绝，要求先停止；G03 阶段的跨 Profile 启动限制已由 G04 同端口原子切换取代。
 - 验证：生产保存入口的真实 HTTP 回归与独立烟测确认虚拟模型重命名、上游更换/排序/启停、最后一池禁用后再启用、其他 Profile 保存隔离、停止后保存、端口拒绝及并发操作。
 
 ### G04 复用服务时仍保留旧 Profile 的 resolver
 
-- [ ] 同步活动池、Profile、供应商解析器及状态归属，不能只替换池列表。
-- 证据：**代码确认**。`resolveGatewayForwarder(profileId)` 捕获该 Profile 的配置；已有实例时 `startGateway` 只调用 `gateway.setPools(pools)`，不替换旧 forwarder。
+- [x] 同步活动池、Profile、供应商解析器及状态归属，不能只替换池列表。
+- 修复前证据：**代码确认**。`resolveGatewayForwarder(profileId)` 捕获该 Profile 的配置；已有实例时 `startGateway` 只调用 `gateway.setPools(pools)`，不替换旧 forwarder。
 - 位置：`electron/main.ts` 的 `resolveGatewayForwarder`、`startGateway`，约 593–635 行；`GatewayServer` 构造函数。
 - 影响：复用实例后可能仍使用旧 Profile 的供应商地址、请求头和凭据引用；界面当前 Profile 与全局运行状态归属不明确。
 - 验收：Default/Work 使用相同 provider ID、不同本地上游和测试凭据，切换运行目标后请求只到正确上游；状态明确标识活动 Profile；停止操作的作用对象明确；失败切换不留下错误的状态归属。
-- G02/G03 已禁止已有实例跨 Profile 复用，必须先停止，避免旧 resolver 和健康归属串用。完整活动 Profile 状态展示、停止对象说明及 Profile 热切换语义仍未完成，本项不勾选。
+- 修复：协调器统一拥有活动实例/端口/Profile；同端口先加载目标 Profile 的 resolver、Token 与池，再同步切换。每个请求在读取正文前捕获池、resolver、历史回调和统计 Map；旧请求的延迟解析或故障切换不会读取新 Profile 的配置，完成后也不会污染当前统计。
+- 失败语义：resolver、Token、偏好提交或初次绑定失败不会谎报新归属；已有服务保持原路由。停止必须携带预期活动 Profile，过期页面不能误停切换后的实例。不同端口仍要求先停止（G11），不静默忽略端口。
+- 界面：状态显示活动 Profile 与监听地址；无草稿/空 Profile 页面也能明确停止正在运行的 Profile。查看其他 Profile 时隐藏旧 Profile 的统计和 Token；保存、启动、停止通知均标识目标 Profile，失败后刷新实际状态。
+- 运行验证发现并修复 JSON 并发提交 `rename EPERM`：元数据写入在持久化边界串行化；网关停止等待请求历史提交完成，防止关闭后继续写入。没有通过重试、吞异常或缩减测试绕过问题。
 
 ## 第二组：转发与资源生命周期（P2）
 
@@ -159,8 +162,9 @@ G01 → G02/G04 → G03/G11 → G05/G06/G07 → G08/G09/G10 → G12。
 | 项目 | 改动文件/提交 | 实际验证 | 仍有限制 |
 | --- | --- | --- | --- |
 | G01 | `27f475c`；`packages/core/src/gateway.ts`、`gateway.test.ts`、`CHANGELOG.md` | 网关专项 19 项通过；类型检查及生产构建通过；全量 420 通过、5 跳过、2 项因既有 Windows 符号链接 EPERM 失败；独立 HTTP 烟测确认 Chat/Responses 200、模型替换、完整 SSE/DONE、503→下一上游 200、无 Token 401、Origin 403 | G05 的直接转发 signal 取消与响应体超时未完成；其他未勾选项保持待修复 |
-| G02 | `electron/metadata-store.ts`、`domain.ts`、网关组件、IPC/preload/global/mock 及行为测试 | SQLite/JSON 同名池、旧数据迁移/回滚、永久隔离未知健康记录、重开及 UI 异步切换回归通过；浏览器预览确认同名池往返切换、旧草稿/Token 隔离 | 旧记录无法确定的归属不猜测，保留但不显示于任一有效 Profile；全局活动 Profile 状态展示仍属于 G04 |
-| G03 | `electron/gateway-config.ts`、`electron/main.ts`、网关保存说明及真实 HTTP 测试 | 两个后端通过生产保存入口的真实 HTTP 路由变更、启停、其他 Profile 隔离、端口拒绝、并发保存/启动/停止回归与独立烟测 | 活动端口修改及跨 Profile 启动必须先停止；G04/G11 剩余事项未勾选 |
+| G02 | `0144a8a`；`electron/metadata-store.ts`、`domain.ts`、网关组件、IPC/preload/global/mock 及行为测试 | SQLite/JSON 同名池、旧数据迁移/回滚、永久隔离未知健康记录、重开及 UI 异步切换回归通过；浏览器预览确认同名池往返切换、旧草稿/Token 隔离 | 旧记录无法确定的归属不猜测，保留但不显示于任一有效 Profile |
+| G03 | `0144a8a`；`electron/gateway-config.ts`、`electron/main.ts`、网关保存说明及真实 HTTP 测试 | 两个后端通过生产保存入口的真实 HTTP 路由变更、启停、其他 Profile 隔离、端口拒绝、并发保存/启动/停止回归与独立烟测 | 活动端口变化仍须先停止（G11）；跨 Profile 同端口切换已由 G04 完成 |
+| G04 | `electron/gateway-config.ts`、`main.ts`、核心网关、元数据持久化、IPC/preload/global/mock、网关组件、双语文案及行为测试 | 专项 81 项通过；SQLite/JSON 独立真实 HTTP 确认同 ID 的 A→B→A URL/凭据/请求头隔离、旧请求 503 故障切换归属、当前统计隔离、失败保留旧服务、过期停止拒绝、同 Profile resolver 更新及初次绑定失败不占归属；浏览器确认活动 Profile/停止对象/同端口切换 | 不同端口仍需先停止（G11）；G05 等未勾选项未展开 |
 
 ### G02/G03 本轮验证
 
@@ -168,3 +172,10 @@ G01 → G02/G04 → G03/G11 → G05/G06/G07 → G08/G09/G10 → G12。
 - 最终全量测试：**440 通过、5 跳过、2 失败**。仅保留既有 `packages/core/src/prompt-library.test.ts` 的 Windows 符号链接 `EPERM`；本轮最初发现的 7 项新目录打开 SQLite 失败已通过在初始化前创建目录修复，未隐藏或跳过测试。
 - 独立 Node HTTP 烟测在新建的隔离数据目录中分别使用 SQLite/JSON，确认保存即应用、模型替换、禁用/再启用、不影响其他 Profile、拒绝活动端口更改，以及停止后保存和重开数据保留；临时目录已清理。
 - 浏览器预览仅用于 UI 状态切换验证；真实 HTTP 证明来自生产保存协调器和真实网关服务，未声称启动完整 Electron IPC 会话。
+
+### G04 本轮验证
+
+- 最终专项 **81 项通过**；类型检查及生产构建通过。全量 **458 通过、5 跳过、2 失败**，失败仍仅是 `packages/core/src/prompt-library.test.ts` 的既有 Windows 符号链接 `EPERM`。
+- 实测发现 JSON 元数据并发提交导致 `rename EPERM`，修复为串行原子提交；随后关闭目录时发现历史写入尚未完成，修复为停止返回前等待写入。保留并发持久化重开、停止后历史可读的行为回归，未跳过失败测试。
+- 独立 Node 烟测使用真实网关、两个本地上游及隔离临时数据目录，两个后端均通过；浏览器预览确认查看另一 Profile 时仍明确显示真实运行归属、隐藏其他归属 Token、空页面可停止活动 Profile，以及同端口直接切换。没有声称启动完整 Electron IPC 会话。
+- 浏览器及预览服务已关闭，烟测临时目录已清理；没有创建持久化烟测脚本，未触碰 `.codegraph/`、`sync/`。

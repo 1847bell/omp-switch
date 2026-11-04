@@ -52,7 +52,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const { t } = useTranslation();
   const [pools, setPools] = useState<GatewayPool[]>([]);
   const [draft, setDraft] = useState<GatewayPool | null>(null);
-  const [status, setStatus] = useState<{ running: boolean; port: number | null; upstreams: GatewayUpstreamStat[] }>({ running: false, port: null, upstreams: [] });
+  const [status, setStatus] = useState<{ running: boolean; profileId: string | null; port: number | null; upstreams: GatewayUpstreamStat[] }>({ running: false, profileId: null, port: null, upstreams: [] });
   const [token, setToken] = useState<string | null>(null);
   const [healthMap, setHealthMap] = useState<Record<string, GatewayUpstreamHealth>>({});
 
@@ -60,11 +60,17 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const [probingAll, setProbingAll] = useState(false);
   const modelOptions = useMemo(() => providers.flatMap(([providerId, provider]) => (Array.isArray(provider.models) ? provider.models : []).map((model) => ({ providerId, modelId: model.id, label: `${providerId}/${model.id}` }))), [providers]);
 
+  async function refreshStatus(): Promise<void> {
+    const current = await api.gatewayStatus();
+    setStatus(current);
+    if (!current.running || current.profileId !== profileId) setToken(null);
+  }
+
   async function refresh(): Promise<void> {
     setLoading(true);
     try {
       setPools(await api.listGatewayPools(profileId));
-      setStatus(await api.gatewayStatus());
+      await refreshStatus();
       const health = await api.gatewayHealth(profileId);
       setHealthMap(health);
     } catch (error) {
@@ -104,7 +110,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
       const saved = await api.saveGatewayPool({ ...draft, id: draft.id.trim(), virtualModel: draft.virtualModel.trim() });
       setPools((current) => [saved, ...current.filter((pool) => pool.id !== saved.id)]);
       setDraft(saved);
-      onNotice({ tone: "success", text: t("gateway.poolSaved") });
+      onNotice({ tone: "success", text: t("gateway.poolSaved", { profile: profileId }) });
       return saved;
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
@@ -116,16 +122,21 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
 
   async function start(): Promise<void> {
     if (readOnly) return onNotice({ tone: "error", text: t("gateway.readonly") });
+    setToken(null);
     const saved = await saveDraft();
-    if (!saved) return;
+    if (!saved) {
+      await refreshStatus().catch((error) => onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
     setLoading(true);
     try {
       const started = await api.startGateway(profileId);
-      setStatus((current) => ({ running: started.running, port: started.port, upstreams: current.upstreams }));
+      setStatus({ running: started.running, profileId: started.profileId, port: started.port, upstreams: [] });
       setToken(started.token);
-      onNotice({ tone: "success", text: t("gateway.started", { port: started.port }) });
+      onNotice({ tone: "success", text: t("gateway.started", { profile: started.profileId, port: started.port }) });
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      await refreshStatus().catch((refreshError) => onNotice({ tone: "error", text: refreshError instanceof Error ? refreshError.message : String(refreshError) }));
     } finally {
       setLoading(false);
     }
@@ -182,14 +193,17 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   async function stop(): Promise<void> {
+    const expectedProfileId = status.profileId;
+    if (!status.running || !expectedProfileId) return;
     setLoading(true);
+    setToken(null);
     try {
-      await api.stopGateway();
-      setStatus({ running: false, port: null, upstreams: [] });
-      setToken(null);
-      onNotice({ tone: "success", text: t("gateway.stopped") });
+      await api.stopGateway(expectedProfileId);
+      await refreshStatus();
+      onNotice({ tone: "success", text: t("gateway.stopped", { profile: expectedProfileId }) });
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
+      await refreshStatus().catch((refreshError) => onNotice({ tone: "error", text: refreshError instanceof Error ? refreshError.message : String(refreshError) }));
     } finally {
       setLoading(false);
     }
@@ -204,8 +218,13 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
         </div>
         <div className="heading-actions">
           <span className={`status-chip ${status.running ? "ok" : "neutral"}`}>
-            {status.running ? t("gateway.running", { port: status.port }) : t("gateway.stoppedBadge")}
+            {status.running ? t("gateway.running", { profile: status.profileId, port: status.port }) : t("gateway.stoppedBadge")}
           </span>
+          {status.running ? (
+            <button className="secondary-button" onClick={() => void stop()} disabled={loading}>
+              <Square size={14} />{t("gateway.stop", { profile: status.profileId })}
+            </button>
+          ) : null}
           <IconButton label={t("common.refresh")} onClick={() => void refresh()} disabled={loading}>
             <RefreshCw size={16} className={loading ? "spin" : ""} />
           </IconButton>
@@ -394,24 +413,18 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                 <button className="primary-button" onClick={() => void saveDraft()} disabled={loading || readOnly}>
                   <Save size={15} />{t("common.save")}
                 </button>
-                {status.running ? (
-                  <button className="secondary-button" onClick={() => void stop()} disabled={loading}>
-                    <Square size={14} />{t("gateway.stop")}
-                  </button>
-                ) : (
-                  <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly}>
-                    <Play size={14} />{t("gateway.start")}
-                  </button>
-                )}
+                <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly}>
+                  <Play size={14} />{t(status.running && status.profileId !== profileId ? "gateway.switchProfile" : "gateway.start", { profile: profileId })}
+                </button>
               </div>
               <p className="muted-line">{t("gateway.saveHint")}</p>
-              {token ? (
+              {token && status.running && status.profileId === profileId ? (
                 <label className="module-field">
                   <span>{t("gateway.bearerToken")}</span>
                   <input name="bearerToken" className="mono" readOnly value={token} onFocus={(event) => event.currentTarget.select()} />
                 </label>
               ) : null}
-              {status.upstreams.length > 0 ? (
+              {status.running && status.profileId === profileId && status.upstreams.length > 0 ? (
                 <div className="upstream-list">
                   <div className="drawer-section-title">
                     <span>{t("gateway.upstreamStatus")}</span>

@@ -10,7 +10,6 @@ import {
   CatalogBundle,
   Diagnostic,
   GatewayPool,
-  GatewayServer,
   OmpSurfaceAdapter,
   OmpInstallation,
   OmpFilesystemAdapter,
@@ -59,12 +58,7 @@ let secrets: CredentialStore;
 let metadata: MetadataStore;
 let surfaces: OmpSurfaceAdapter;
 let promptLibrary: PromptLibraryService;
-let gateway: GatewayServer | null = null;
-let gatewayProfileId = "default";
-let gatewayPort: number | null = null;
-const gatewayConfig = new GatewayConfigCoordinator(() => gateway && gatewayPort !== null
-  ? { server: gateway, profile: gatewayProfileId, port: gatewayPort }
-  : null);
+const gatewayConfig = new GatewayConfigCoordinator({ loadToken: loadGatewayToken, resolveForwarder: resolveGatewayForwarder });
 let projectRoot = process.cwd();
 let projectRootExplicit = false;
 const currentDir = import.meta.dirname;
@@ -485,11 +479,7 @@ function registerIpc(): void {
     safeSessionProfileId(pool.profile);
     return gatewayConfig.save(metadata, pool);
   });
-  ipcMain.handle("gateway:status", () => ({
-    running: gateway?.running ?? false,
-    port: gateway?.running ? gatewayPort : null,
-    upstreams: gateway?.getStats() ?? [],
-  }));
+  ipcMain.handle("gateway:status", () => gatewayConfig.status());
   ipcMain.handle("gateway:health", (_event, profileId: string, poolId?: string) => metadata.getGatewayHealth(safeSessionProfileId(profileId), poolId));
   ipcMain.handle("gateway:probe", async (_event, profile: string, poolId: string, upstreamId: string, timeoutMs?: number) => {
     const profileId = safeSessionProfileId(profile);
@@ -513,12 +503,8 @@ function registerIpc(): void {
     return result;
   });
 
-  ipcMain.handle("gateway:start", async (_event, profileId: string) => startGateway(profileId));
-  ipcMain.handle("gateway:stop", () => gatewayConfig.runExclusive(async () => {
-    await gateway?.stop();
-    gateway = null;
-    gatewayPort = null;
-  }));
+  ipcMain.handle("gateway:start", (_event, profileId: string) => gatewayConfig.start(metadata, safeSessionProfileId(profileId)));
+  ipcMain.handle("gateway:stop", (_event, expectedProfileId: string) => gatewayConfig.stop(safeSessionProfileId(expectedProfileId)));
   ipcMain.handle("omp:update", (_event, profileId: string = "default") => runOmpUpdate(profileId));
   ipcMain.handle("secret:put", async (_event, input: { id?: string; label: string; value: string }) => {
     if (!input || typeof input !== "object") throw new Error("Secret input must be an object");
@@ -597,46 +583,6 @@ async function resolveGatewayForwarder(profileId: string) {
   };
 }
 
-function startGateway(profile: string): Promise<{ running: boolean; port: number; token: string }> {
-  const profileId = safeSessionProfileId(profile);
-  return gatewayConfig.runExclusive(() => startGatewayNow(profileId));
-}
-
-async function startGatewayNow(profileId: string): Promise<{ running: boolean; port: number; token: string }> {
-  if (gateway && gatewayProfileId !== profileId) {
-    throw new Error("Stop the gateway before starting a different profile");
-  }
-  const pools = metadata.listGatewayPools(profileId).filter((pool) => pool.enabled);
-  if (pools.length === 0) throw new Error("No enabled gateway pools exist for this profile");
-  const port = pools[0]?.port ?? metadata.getPreference<number>("gateway.port") ?? 46831;
-  const token = await loadGatewayToken();
-  const forwarder = await resolveGatewayForwarder(profileId);
-  if (!gateway) {
-    // Retain ownership even if binding fails: another profile must stop this instance first.
-    gatewayProfileId = profileId;
-    gateway = new GatewayServer({
-      resolve: forwarder.resolve,
-      onAttempt: (observation) => {
-        void metadata.recordGatewayProbe({
-          profile: profileId,
-          poolId: observation.poolId,
-          upstreamId: observation.upstreamId,
-          timestamp: new Date().toISOString(),
-          ok: !observation.error && (observation.status === undefined || observation.status < 400),
-          status: observation.status,
-          latencyMs: observation.latencyMs,
-          error: observation.error,
-        }).catch(() => undefined);
-      },
-    }, pools, { token });
-  } else {
-    gateway.setPools(pools);
-  }
-  const boundPort = await gateway.start(port);
-  gatewayPort = boundPort;
-  await metadata.setPreference("gateway.port", boundPort);
-  return { running: true, port: boundPort, token };
-}
 
 async function runOmpUpdate(profileId = "default"): Promise<{ ok: boolean; output: string; installation: OmpInstallation; snapshot?: Snapshot }> {
   const executable = adapter.installation.executable;
@@ -816,7 +762,7 @@ app.whenReady().then(async () => {
   const gatewayIndex = process.argv.indexOf("--gateway");
   if (gatewayIndex >= 0) {
     const profile = process.argv[gatewayIndex + 1] || "default";
-    const started = await startGateway(profile);
+    const started = await gatewayConfig.start(metadata, safeSessionProfileId(profile));
     // The token itself is not printed: stderr can be redirected into logs. Point at the 0600 file.
     await writeCliLine(process.stderr, `Gateway listening on 127.0.0.1:${started.port}; bearer token in ${path.join(app.getPath("userData"), "gateway", "gateway.token")}`);
     return;
@@ -844,7 +790,7 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   // Keep the loopback gateway alive after the GUI closes; it can be stopped from a later GUI session or process exit.
-  if (gateway?.running) return;
+  if (gatewayConfig.status().running) return;
   if (process.platform !== "darwin") app.quit();
 });
 

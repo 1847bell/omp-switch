@@ -57,11 +57,11 @@ export interface OmpSwitchApi {
   setUsagePrice(key: string, price: ModelPrice | null): Promise<PricingTable>;
   listGatewayPools(profileId: string): Promise<GatewayPool[]>;
   saveGatewayPool(pool: GatewayPool): Promise<GatewayPool>;
-  gatewayStatus(): Promise<{ running: boolean; port: number | null; upstreams: GatewayUpstreamStat[] }>;
+  gatewayStatus(): Promise<{ running: boolean; profileId: string | null; port: number | null; upstreams: GatewayUpstreamStat[] }>;
   gatewayHealth(profileId: string, poolId?: string): Promise<Record<string, GatewayUpstreamHealth>>;
   probeGatewayUpstream(profileId: string, poolId: string, upstreamId: string, timeoutMs?: number): Promise<{ ok: boolean; status?: number; latencyMs: number; error?: string }>;
-  startGateway(profileId: string): Promise<{ running: boolean; port: number; token: string }>;
-  stopGateway(): Promise<void>;
+  startGateway(profileId: string): Promise<{ running: true; profileId: string; port: number; token: string }>;
+  stopGateway(expectedProfileId: string): Promise<void>;
   updateOmp(profileId?: string): Promise<{ ok: boolean; output: string; installation?: { version: string | null; supported: boolean; reason?: string }; snapshot?: Snapshot }>;
   secretPut(input: { id?: string; label: string; value: string }): Promise<{ id: string; command: string }>;
   secretStatus(id: string): Promise<{ exists: boolean; label: string; masked: string }>;

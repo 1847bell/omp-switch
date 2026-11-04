@@ -83,6 +83,31 @@ describe.each(["auto", "json"] as const)("MetadataStore (%s backend)", (backend)
     expect(store.getProviderLabels()).toEqual({ openai: "Renamed", groq: "Groq" });
   });
 
+  it("preserves concurrent pool, probe and preference commits after reopening", async () => {
+    const { root, store } = await makeStore(backend);
+    const defaultPool = pool("same");
+    const workPool = pool("same", "work");
+    await Promise.all([
+      store.saveGatewayPool(defaultPool),
+      store.saveGatewayPool(workPool),
+      store.recordGatewayProbe({ profile: "default", poolId: "same", upstreamId: "one", timestamp: "2026-11-04T00:00:00Z", ok: true, status: 200, latencyMs: 12 }),
+      store.recordGatewayProbe({ profile: "work", poolId: "same", upstreamId: "one", timestamp: "2026-11-04T00:00:01Z", ok: false, status: 503, latencyMs: 24 }),
+      store.setPreference("gateway.port", 47000),
+      store.setProviderLabel("openai", "Local test provider"),
+    ]);
+    store.close();
+    const reopened = new MetadataStore(root, { backend });
+    await reopened.init();
+    openStores.push(reopened);
+    expect(reopened.activeBackend).toBe(backend === "auto" ? "sqlite" : "json");
+    expect(reopened.listGatewayPools("default")).toEqual([defaultPool]);
+    expect(reopened.listGatewayPools("work")).toEqual([workPool]);
+    expect(reopened.getGatewayHealth("default")["same:one"].lastStatus).toBe(200);
+    expect(reopened.getGatewayHealth("work")["same:one"].lastStatus).toBe(503);
+    expect(reopened.getPreference("gateway.port")).toBe(47000);
+    expect(reopened.getProviderLabels()).toEqual({ openai: "Local test provider" });
+  });
+
   it("returns the newest snapshot per profile and keeps profiles apart", async () => {
     const { store } = await makeStore(backend);
     expect(store.getLatestSnapshot("default")).toBeNull();

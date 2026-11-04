@@ -86,6 +86,7 @@ export class MetadataStore {
   private sqlite: SqliteDb | null = null;
   private fallback: MetadataState = emptyState();
   private hasFts = false;
+  private fallbackWrites: Promise<void> = Promise.resolve();
 
   constructor(userDataDir: string, options: MetadataStoreOptions = {}) {
     this.filePath = path.join(userDataDir, "metadata.sqlite");
@@ -549,15 +550,19 @@ export class MetadataStore {
     return this.fallback.preferences[key] as T | undefined;
   }
 
-  private async persistFallback(): Promise<void> {
-    const target = this.filePath + ".json";
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    const temporary = target + "." + randomUUID() + ".tmp";
-    try {
-      await fs.writeFile(temporary, JSON.stringify(this.fallback, null, 2), "utf8");
-      await fs.rename(temporary, target);
-    } finally {
-      await fs.rm(temporary, { force: true }).catch(() => undefined);
-    }
+  private persistFallback(): Promise<void> {
+    const write = this.fallbackWrites.then(async () => {
+      const target = this.filePath + ".json";
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      const temporary = target + "." + randomUUID() + ".tmp";
+      try {
+        await fs.writeFile(temporary, JSON.stringify(this.fallback, null, 2), "utf8");
+        await fs.rename(temporary, target);
+      } finally {
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+      }
+    });
+    this.fallbackWrites = write.catch(() => undefined);
+    return write;
   }
 }

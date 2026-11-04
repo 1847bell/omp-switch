@@ -54,7 +54,7 @@ const api = {
   gatewayHealth: (profileId: string, poolId?: string): Promise<Record<string, GatewayUpstreamHealth>> => ipcRenderer.invoke("gateway:health", profileId, poolId),
   probeGatewayUpstream: (profileId: string, poolId: string, upstreamId: string, timeoutMs?: number) => ipcRenderer.invoke("gateway:probe", profileId, poolId, upstreamId, timeoutMs),
   startGateway: (profileId: string) => ipcRenderer.invoke("gateway:start", profileId),
-  stopGateway: () => ipcRenderer.invoke("gateway:stop"),
+  stopGateway: (expectedProfileId: string) => ipcRenderer.invoke("gateway:stop", expectedProfileId),
   updateOmp: (profileId = "default") => ipcRenderer.invoke("omp:update", profileId),
   secretPut: (input: { id?: string; label: string; value: string }): Promise<{ id: string; command: string }> => ipcRenderer.invoke("secret:put", input),
   secretStatus: (id: string) => ipcRenderer.invoke("secret:status", id),

@@ -7,7 +7,9 @@
 - Gateway drafts use the full editor width when no pools exist. Upstream fields adapt to the editor width, with grouped health/probe/delete controls that stay inside the panel on narrow windows.
 - Gateway Chat/Responses requests no longer treat a completed upload as client cancellation. Actual disconnects cancel pending upstream requests and release relayed response streams.
 - Gateway pools and health history are isolated by profile, including equal pool IDs. Existing metadata is migrated without assigning ambiguous legacy probe records to a profile, and changing profiles clears the previous editor state.
-- Saving a running gateway pool now applies its model and upstream routing changes before reporting success. Live port changes and cross-profile starts require stopping first; save/start/stop operations are serialized to prevent stale configuration from being applied.
+- Saving a running gateway pool now applies its model and upstream routing changes before reporting success. Live port changes require stopping first; save/start/stop operations are serialized to prevent stale configuration from being applied.
+- Same-port gateway Profile switches replace the resolver, credentials, pools and runtime ownership together. In-flight requests retain their original Profile, and failed switches preserve the active service. Status and stop controls identify the active Profile; stale stop requests cannot stop a newly selected Profile.
+- JSON metadata commits are serialized so request history cannot race with gateway configuration writes. Gateway stop waits for pending history commits before completing.
 
 ## 1.0.2 - 2026-11-02
 

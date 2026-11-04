@@ -309,16 +309,23 @@ export interface GatewayServerOptions {
 
 export class GatewayServer {
   private server: http.Server | null = null;
-  private readonly stats = new Map<string, GatewayUpstreamStat>();
+  private stats = new Map<string, GatewayUpstreamStat>();
 
   constructor(
-    private readonly forwarder: GatewayForwarder,
+    private forwarder: GatewayForwarder,
     private pools: GatewayPool[],
     private readonly options: GatewayServerOptions = {},
   ) {}
 
   setPools(pools: GatewayPool[]): void {
     this.pools = pools;
+  }
+
+  setConfiguration(pools: GatewayPool[], forwarder: GatewayForwarder, token = this.options.token): void {
+    this.pools = pools;
+    this.forwarder = forwarder;
+    this.options.token = token;
+    this.stats = new Map();
   }
 
   get running(): boolean {
@@ -329,11 +336,11 @@ export class GatewayServer {
     return Array.from(this.stats.values());
   }
 
-  private recordAttempt(observation: { poolId: string; upstreamId: string; status?: number; latencyMs: number; error?: string }): void {
+  private recordAttempt(stats: Map<string, GatewayUpstreamStat>, observation: { poolId: string; upstreamId: string; status?: number; latencyMs: number; error?: string }): void {
     const key = `${observation.poolId}:${observation.upstreamId}`;
-    const previous = this.stats.get(key);
+    const previous = stats.get(key);
     const failed = observation.error !== undefined || isRetryableGatewayStatus(observation.status);
-    this.stats.set(key, {
+    stats.set(key, {
       poolId: observation.poolId,
       upstreamId: observation.upstreamId,
       lastStatus: observation.status,
@@ -392,23 +399,26 @@ export class GatewayServer {
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const pools = this.pools;
+    const requestForwarder = this.forwarder;
+    const stats = this.stats;
     try {
       const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
       if (request.method === "GET" && path === "/healthz") {
         // Liveness stays unauthenticated, like OMP's own gateway, and exposes no pool identifiers.
-        writeJson(response, 200, { ok: true, pools: this.pools.filter((pool) => pool.enabled).length, authRequired: Boolean(this.options.token) });
+        writeJson(response, 200, { ok: true, pools: pools.filter((pool) => pool.enabled).length, authRequired: Boolean(this.options.token) });
         return;
       }
       if (!this.authorize(request, response)) return;
       if (request.method === "GET" && path === "/v1/models") {
-        writeJson(response, 200, { object: "list", data: this.pools.filter((pool) => pool.enabled).map((pool) => ({ id: pool.virtualModel, object: "model" })) });
+        writeJson(response, 200, { object: "list", data: pools.filter((pool) => pool.enabled).map((pool) => ({ id: pool.virtualModel, object: "model" })) });
         return;
       }
       if (request.method === "POST" && path === "/v1/probe") {
         const body = await readJsonBody(request);
         const poolId = typeof body.poolId === "string" ? body.poolId : "";
         const upstreamId = typeof body.upstreamId === "string" ? body.upstreamId : "";
-        const pool = this.pools.find((candidate) => candidate.id === poolId);
+        const pool = pools.find((candidate) => candidate.id === poolId);
         if (!pool) {
           writeJson(response, 404, { error: { message: "Unknown pool" } });
           return;
@@ -418,11 +428,7 @@ export class GatewayServer {
           writeJson(response, 404, { error: { message: "Unknown upstream" } });
           return;
         }
-        const forwarder: GatewayForwarder = {
-          ...this.forwarder,
-          resolve: (target) => this.forwarder.resolve(target),
-        };
-        const result = await probeGatewayUpstream(upstream, forwarder, { timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined });
+        const result = await probeGatewayUpstream(upstream, requestForwarder, { timeoutMs: typeof body.timeoutMs === "number" ? body.timeoutMs : undefined });
         writeJson(response, 200, result);
         return;
       }
@@ -439,17 +445,17 @@ export class GatewayServer {
       });
       const body = await readJsonBody(request);
       const model = typeof body.model === "string" ? body.model : "";
-      const pool = this.pools.find((candidate) => candidate.enabled && candidate.virtualModel === model);
+      const pool = pools.find((candidate) => candidate.enabled && candidate.virtualModel === model);
       if (!pool) {
         writeJson(response, 404, { error: { message: "Unknown virtual model" } });
         return;
       }
       const forwarder: GatewayForwarder = {
-        ...this.forwarder,
-        resolve: (upstream) => this.forwarder.resolve(upstream),
+        ...requestForwarder,
+        resolve: (upstream) => requestForwarder.resolve(upstream),
         onAttempt: (observation) => {
-          this.recordAttempt(observation);
-          this.forwarder.onAttempt?.(observation);
+          this.recordAttempt(stats, observation);
+          requestForwarder.onAttempt?.(observation);
         },
       };
       copyResponse(await forwardGatewayRequest(pool, { path, body, signal: clientAbortController.signal }, forwarder), response);

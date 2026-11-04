@@ -1,7 +1,8 @@
 import http from "node:http";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { describe, expect, it } from "vitest";
 import { evaluateUpstreamHealth, forwardGatewayRequest, GatewayServer, isLoopbackHostHeader, isRetryableGatewayStatus, probeGatewayUpstream, validateGatewayPool } from "./gateway";
+import type { GatewayUpstream } from "./domain";
 
 const pool = {
   id: "fast",
@@ -366,4 +367,60 @@ describe("gateway routing", () => {
       ok: false,
     });
   });
+});
+
+it("keeps in-flight failover on its original resolver and observations after configuration replacement", async () => {
+  const gate = new EventEmitter();
+  const entered = once(gate, "entered");
+  const seen: Array<{ route: string; key?: string; owner?: string | string[] }> = [];
+  const upstream = http.createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain the real request body. */ }
+    seen.push({ route: request.url ?? "", key: request.headers.authorization, owner: request.headers["x-owner"] });
+    if (request.url?.startsWith("/alpha/one/")) {
+      const released = once(gate, "released");
+      gate.emit("entered");
+      await released;
+      response.writeHead(503);
+      response.end("retry");
+    } else {
+      response.writeHead(200);
+      response.end(request.url);
+    }
+  });
+  const upstreamPort = await listenLoopback(upstream);
+  const history: string[] = [];
+  const forwarder = (profile: string) => ({
+    resolve: async (target: GatewayUpstream) => ({
+      baseUrl: `http://127.0.0.1:${upstreamPort}/${profile}/${target.id}`,
+      apiKey: `${profile}-key`, headers: { "x-owner": profile },
+    }),
+    onAttempt: (observation: { upstreamId: string }) => { history.push(`${profile}:${observation.upstreamId}`); },
+  });
+  const server = new GatewayServer(forwarder("alpha"), [pool], { token: "test-token" });
+  const port = await server.start(0);
+  const request = () => fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: "POST", headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+    body: JSON.stringify({ model: pool.virtualModel, messages: [] }),
+  });
+  try {
+    const pending = request();
+    await entered;
+    server.setConfiguration([{ ...pool, profile: "beta" }], forwarder("beta"));
+    gate.emit("released");
+    expect(await (await pending).text()).toBe("/alpha/two/v1/chat/completions");
+    expect(history).toEqual(["alpha:one", "alpha:two"]);
+    expect(server.getStats()).toEqual([]);
+    expect(await (await request()).text()).toBe("/beta/one/v1/chat/completions");
+    expect(history).toEqual(["alpha:one", "alpha:two", "beta:one"]);
+    expect(server.getStats()).toHaveLength(1);
+    expect(seen).toEqual([
+      { route: "/alpha/one/v1/chat/completions", key: "Bearer alpha-key", owner: "alpha" },
+      { route: "/alpha/two/v1/chat/completions", key: "Bearer alpha-key", owner: "alpha" },
+      { route: "/beta/one/v1/chat/completions", key: "Bearer beta-key", owner: "beta" },
+    ]);
+  } finally {
+    gate.emit("released");
+    await server.stop();
+    const closed = once(upstream, "close"); upstream.close(); await closed;
+  }
 });

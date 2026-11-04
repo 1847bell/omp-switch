@@ -344,17 +344,20 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       gatewayPools.set(pool.profile, pools);
       return structuredClone(pool);
     },
-    gatewayStatus: async () => ({ running: runningGateway !== null, port: runningGateway?.port ?? null, upstreams: [] }),
+    gatewayStatus: async () => ({ running: runningGateway !== null, profileId: runningGateway?.profile ?? null, port: runningGateway?.port ?? null, upstreams: [] }),
     gatewayHealth: async (_profileId, _poolId) => ({}),
     probeGatewayUpstream: async (_profileId, _poolId, _upstreamId, _timeoutMs) => ({ ok: true, status: 200, latencyMs: 115 }),
     startGateway: async (profileId) => {
-      if (runningGateway && runningGateway.profile !== profileId) throw new Error("Stop the gateway before starting another profile");
       const pool = [...gatewayPools.get(profileId)?.values() ?? []].find((candidate) => candidate.enabled);
       if (!pool) throw new Error("No enabled gateway pools exist for this profile");
+      if (runningGateway && runningGateway.port !== pool.port) throw new Error("Stop the gateway before changing its port");
       runningGateway = { profile: profileId, port: pool.port };
-      return { running: true, port: pool.port, token: "demo-gateway-token" };
+      return { running: true, profileId, port: pool.port, token: "demo-gateway-token" };
     },
-    stopGateway: async () => { runningGateway = null; },
+    stopGateway: async (expectedProfileId) => {
+      if (runningGateway && runningGateway.profile !== expectedProfileId) throw new Error("The active gateway profile changed; refresh before stopping it");
+      runningGateway = null;
+    },
     updateOmp: async () => ({ ok: false, output: "Demo mode" }),
   };
 }
