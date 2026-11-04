@@ -5,6 +5,7 @@ interface ActiveGateway {
   server: GatewayServer;
   profile: string;
   port: number;
+  token: string;
 }
 
 interface GatewayRuntimeDependencies {
@@ -26,10 +27,10 @@ export class GatewayConfigCoordinator {
     return result;
   }
 
-  status() {
+  status(profileId?: string) {
     const active = this.active;
     return active?.server.running
-      ? { running: true, profileId: active.profile, port: active.port, upstreams: active.server.getStats() }
+      ? { running: true, profileId: active.profile, port: active.port, upstreams: active.server.getStats(), token: profileId === active.profile ? active.token : undefined }
       : { running: false, profileId: null, port: null, upstreams: [] };
   }
 
@@ -63,7 +64,7 @@ export class GatewayConfigCoordinator {
       if (active) {
         await store.setPreference("gateway.port", port);
         active.server.setConfiguration(pools, forwarder, token);
-        this.active = { ...active, profile: profileId };
+        this.active = { ...active, profile: profileId, token };
         return { running: true, profileId, port, token };
       }
       const server = new GatewayServer(forwarder, pools, { token });
@@ -76,7 +77,7 @@ export class GatewayConfigCoordinator {
         await Promise.all(this.probeWrites);
         throw error;
       }
-      this.active = { server, profile: profileId, port: boundPort };
+      this.active = { server, profile: profileId, port: boundPort, token };
       return { running: true, profileId, port: boundPort, token };
     });
   }

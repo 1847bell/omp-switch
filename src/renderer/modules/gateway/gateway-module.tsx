@@ -16,7 +16,6 @@ import type {
   GatewayPool,
   GatewayUpstream,
   GatewayUpstreamHealth,
-  GatewayUpstreamStat,
   OmpProvider,
 } from "@omp-switch/core";
 import { ModelPicker } from "../../components/model-picker";
@@ -58,8 +57,8 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const [pools, setPools] = useState<GatewayPool[]>([]);
   const [draft, setDraft] = useState<GatewayPool | null>(null);
   const [upstreamRowKeys] = useState(() => new WeakMap<GatewayUpstream, string>());
-  const [status, setStatus] = useState<{ running: boolean; profileId: string | null; port: number | null; upstreams: GatewayUpstreamStat[] }>({ running: false, profileId: null, port: null, upstreams: [] });
-  const [token, setToken] = useState<string | null>(null);
+  const [status, setStatus] = useState<Awaited<ReturnType<AppApi["gatewayStatus"]>>>({ running: false, profileId: null, port: null, upstreams: [] });
+  const token = status.running && status.profileId === profileId ? status.token : undefined;
   const [healthMap, setHealthMap] = useState<Record<string, GatewayUpstreamHealth>>({});
 
   const [loading, setLoading] = useState(false);
@@ -70,13 +69,18 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const savedVersion = useMemo(() => JSON.stringify(savedPool), [savedPool]);
   const canProbe = Boolean(savedPool && draftVersion === savedVersion);
 
+  function clearToken(): void {
+    setStatus((current) => current.token === undefined ? current : { ...current, token: undefined });
+  }
+
   async function refreshStatus(): Promise<void> {
-    const current = await api.gatewayStatus();
+    clearToken();
+    const current = await api.gatewayStatus(profileId);
     setStatus(current);
-    if (!current.running || current.profileId !== profileId) setToken(null);
   }
 
   async function refresh(): Promise<void> {
+    clearToken();
     setLoading(true);
     try {
       setPools(await api.listGatewayPools(profileId));
@@ -155,7 +159,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
 
   async function start(): Promise<void> {
     if (readOnly) return onNotice({ tone: "error", text: t("gateway.readonly") });
-    setToken(null);
+    clearToken();
     const saved = await saveDraft();
     if (!saved) {
       await refreshStatus().catch((error) => onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) }));
@@ -164,8 +168,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     setLoading(true);
     try {
       const started = await api.startGateway(profileId);
-      setStatus({ running: started.running, profileId: started.profileId, port: started.port, upstreams: [] });
-      setToken(started.token);
+      setStatus({ running: started.running, profileId: started.profileId, port: started.port, upstreams: [], token: started.token });
       onNotice({ tone: "success", text: t("gateway.started", { profile: started.profileId, port: started.port }) });
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
@@ -253,7 +256,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     const expectedProfileId = status.profileId;
     if (!status.running || !expectedProfileId) return;
     setLoading(true);
-    setToken(null);
+    clearToken();
     try {
       await api.stopGateway(expectedProfileId);
       await refreshStatus();
@@ -292,6 +295,12 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
           ) : null}
         </div>
       </div>
+      {token ? (
+        <label className="module-field">
+          <span>{t("gateway.bearerToken", { profile: status.profileId })}</span>
+          <input name="bearerToken" className="mono" readOnly value={token} onFocus={(event) => event.currentTarget.select()} />
+        </label>
+      ) : null}
       {pools.length === 0 && !draft ? (
         <div className="module-empty gateway-empty-state">
           <span className="empty-glyph"><CircleAlert size={26} /></span>
@@ -481,12 +490,6 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                 </button>
               </div>
               <p className="muted-line">{t("gateway.saveHint")}</p>
-              {token && status.running && status.profileId === profileId ? (
-                <label className="module-field">
-                  <span>{t("gateway.bearerToken")}</span>
-                  <input name="bearerToken" className="mono" readOnly value={token} onFocus={(event) => event.currentTarget.select()} />
-                </label>
-              ) : null}
               {status.running && status.profileId === profileId && status.upstreams.length > 0 ? (
                 <div className="upstream-list">
                   <div className="drawer-section-title">

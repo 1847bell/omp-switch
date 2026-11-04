@@ -43,7 +43,10 @@ async function mount(api = createMockApi()) {
     await act(async () => { button.click(); });
   };
   const runningLabel = (profile: string) => i18n.t("gateway.running", { profile, port: 46831 });
-  return { container, render, selectPool, editModel, save, model, click, runningLabel, notices };
+  const refresh = async () => {
+    await act(async () => { container.querySelector<HTMLButtonElement>(`.module-heading button[aria-label='${i18n.t("common.refresh")}']`)!.click(); });
+  };
+  return { container, render, selectPool, editModel, save, model, click, refresh, runningLabel, notices };
 }
 
 describe("gateway profile isolation", () => {
@@ -111,8 +114,8 @@ describe("gateway active profile ownership", () => {
     await api.saveGatewayPool(pool("work"));
     await api.startGateway("default");
     const getStatus = api.gatewayStatus;
-    api.gatewayStatus = async () => {
-      const status = await getStatus();
+    api.gatewayStatus = async (profileId) => {
+      const status = await getStatus(profileId);
       return { ...status, upstreams: status.profileId === "default" ? [{ poolId: "shared", upstreamId: "one", lastStatus: 503, lastLatencyMs: 1234, lastAt: new Date().toISOString(), consecutiveFailures: 7 }] : [] };
     };
     const view = await mount(api);
@@ -143,7 +146,7 @@ describe("gateway active profile ownership", () => {
     expect(view.container.textContent).toContain(view.runningLabel("default"));
     await view.click("gateway.stop", "default");
     expect(stop).toHaveBeenCalledWith("default");
-    expect((await api.gatewayStatus()).running).toBe(false);
+    expect((await api.gatewayStatus("empty")).running).toBe(false);
     expect(view.container.textContent).toContain(i18n.t("gateway.stoppedBadge"));
     expect(view.notices).toContainEqual({ tone: "success", text: i18n.t("gateway.stopped", { profile: "default" }) });
   });
@@ -159,10 +162,10 @@ describe("gateway active profile ownership", () => {
     await api.startGateway("work");
     await view.click("gateway.stop", "default");
     expect(stop).toHaveBeenCalledWith("default");
-    expect(await api.gatewayStatus()).toMatchObject({ running: true, profileId: "work" });
+    expect(await api.gatewayStatus("work")).toMatchObject({ running: true, profileId: "work" });
     expect(view.container.textContent).toContain(view.runningLabel("work"));
     expect(view.notices.some((notice) => notice.tone === "error")).toBe(true);
-    expect(view.container.querySelector("input[name='bearerToken']")).toBeNull();
+    expect(view.container.querySelector<HTMLInputElement>("input[name='bearerToken']")?.value).toBe((await api.gatewayStatus("work")).token);
   });
 
   it("keeps A ownership and no token while a switch is delayed and after it fails", async () => {
@@ -186,20 +189,6 @@ describe("gateway active profile ownership", () => {
     expect(view.notices.some((notice) => notice.text === i18n.t("gateway.started", { profile: "work", port: 46831 }))).toBe(false);
   });
 
-  it("clears a previously shown token on a failed restart and refreshes status", async () => {
-    const api = createMockApi();
-    await api.saveGatewayPool(pool("default"));
-    const view = await mount(api);
-    await view.selectPool();
-    await view.click("gateway.start", "default");
-    expect(view.container.querySelector("input[name='bearerToken']")).not.toBeNull();
-    const status = vi.spyOn(api, "gatewayStatus");
-    api.startGateway = async () => { throw new Error("Token unavailable"); };
-    await view.click("gateway.start", "default");
-    expect(status).toHaveBeenCalled();
-    expect(view.container.textContent).toContain(view.runningLabel("default"));
-    expect(view.container.querySelector("input[name='bearerToken']")).toBeNull();
-  });
 });
 
 describe("gateway upstream identity", () => {
@@ -246,7 +235,7 @@ describe("gateway upstream identity", () => {
     await view.click("gateway.start", "default");
     expect(view.notices).toContainEqual({ tone: "error", text: i18n.t("gateway.duplicateUpstreamId", { id: "one" }) });
     expect((await api.listGatewayPools("default"))[0]).toEqual(saved);
-    expect((await api.gatewayStatus()).running).toBe(false);
+    expect((await api.gatewayStatus("default")).running).toBe(false);
   });
 });
 
@@ -365,5 +354,76 @@ describe("gateway saved-configuration probes", () => {
     expect(button(view.container, "gateway.probeAll").disabled).toBe(true);
     expect(view.container.textContent).toContain(i18n.t("gateway.probeNoneEnabled"));
     expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
+  });
+});
+
+describe("gateway connection recovery", () => {
+  const token = (container: HTMLElement) => container.querySelector<HTMLInputElement>("input[name='bearerToken']");
+
+  it("restores the running connection without selecting a pool and scopes it through refresh, remount and stop", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const started = await api.startGateway("default");
+    const view = await mount(api);
+    expect(token(view.container)?.value).toBe(started.token);
+    expect(token(view.container)?.readOnly).toBe(true);
+    expect(view.model()).toBeUndefined();
+    await view.refresh();
+    expect(token(view.container)?.value).toBe(started.token);
+    await view.render("work");
+    expect(token(view.container)).toBeNull();
+    expect(view.container.textContent).toContain(view.runningLabel("default"));
+    await view.render("default");
+    expect(token(view.container)?.value).toBe(started.token);
+    await view.click("gateway.stop", "default");
+    expect(token(view.container)).toBeNull();
+    expect(view.container.textContent).toContain(i18n.t("gateway.stoppedBadge"));
+  });
+
+  it.each(["listGatewayPools", "gatewayStatus"] as const)("hides an unconfirmed previous token when %s fails during refresh", async (method) => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    await view.click("gateway.start", "default");
+    expect(token(view.container)).not.toBeNull();
+    api[method] = async () => { throw new Error("Connection refresh failed"); };
+    await view.refresh();
+    expect(token(view.container)).toBeNull();
+    expect(view.notices).toContainEqual({ tone: "error", text: "Connection refresh failed" });
+  });
+
+  it("restores the still-active connection after a failed restart", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api);
+    await view.selectPool();
+    await view.click("gateway.start", "default");
+    expect(token(view.container)).not.toBeNull();
+    const previous = token(view.container)!.value;
+    api.startGateway = async () => { throw new Error("Token unavailable"); };
+    await view.click("gateway.start", "default");
+    expect(token(view.container)?.value).toBe(previous);
+    expect(view.container.textContent).toContain(view.runningLabel("default"));
+    expect(view.notices).toContainEqual({ tone: "error", text: "Token unavailable" });
+  });
+
+  it("does not let a delayed previous-profile status expose its token in the new owner's connection", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    await api.saveGatewayPool(pool("work"));
+    await api.startGateway("default");
+    const getStatus = api.gatewayStatus;
+    const previous = { ...await getStatus("default"), token: "default-only-token" };
+    let finish!: (value: typeof previous) => void;
+    const pending = new Promise<typeof previous>((resolve) => { finish = resolve; });
+    api.gatewayStatus = async (profileId) => profileId === "default" ? pending : { ...await getStatus(profileId), token: "work-only-token" };
+    const view = await mount(api);
+    await api.startGateway("work");
+    await view.render("work");
+    await act(async () => { finish(previous); });
+    expect(token(view.container)?.value).toBe("work-only-token");
+    expect(view.container.textContent).toContain(view.runningLabel("work"));
+    expect(view.container.textContent).not.toContain(view.runningLabel("default"));
   });
 });

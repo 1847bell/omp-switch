@@ -19,7 +19,7 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
   const memory: Record<string, EffectiveConfig> = {};
   const mcpFiles = new Map<string, McpConfigFile>();
   const gatewayPools = new Map<string, Map<string, GatewayPool>>();
-  let runningGateway: { profile: string; port: number } | null = null;
+  let runningGateway: { profile: string; port: number; token: string } | null = null;
   let mcpRevision = 0;
   const sessionProfiles = new Map<string, SessionSummary[]>();
   const getSessions = (profileId: string): SessionSummary[] => {
@@ -344,15 +344,15 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
       gatewayPools.set(pool.profile, pools);
       return structuredClone(pool);
     },
-    gatewayStatus: async () => ({ running: runningGateway !== null, profileId: runningGateway?.profile ?? null, port: runningGateway?.port ?? null, upstreams: [] }),
+    gatewayStatus: async (profileId) => ({ running: runningGateway !== null, profileId: runningGateway?.profile ?? null, port: runningGateway?.port ?? null, upstreams: [], token: runningGateway?.profile === profileId ? runningGateway.token : undefined }),
     gatewayHealth: async (_profileId, _poolId) => ({}),
     probeGatewayUpstream: async (_profileId, _poolId, _upstreamId, _timeoutMs) => ({ ok: true, status: 200, latencyMs: 115 }),
     startGateway: async (profileId) => {
       const pool = [...gatewayPools.get(profileId)?.values() ?? []].find((candidate) => candidate.enabled);
       if (!pool) throw new Error("No enabled gateway pools exist for this profile");
       if (runningGateway && runningGateway.port !== pool.port) throw new Error("Stop the gateway before changing its port");
-      runningGateway = { profile: profileId, port: pool.port };
-      return { running: true, profileId, port: pool.port, token: "demo-gateway-token" };
+      runningGateway = { profile: profileId, port: pool.port, token: "demo-gateway-token" };
+      return { running: true, profileId, port: pool.port, token: runningGateway.token };
     },
     stopGateway: async (expectedProfileId) => {
       if (runningGateway && runningGateway.profile !== expectedProfileId) throw new Error("The active gateway profile changed; refresh before stopping it");

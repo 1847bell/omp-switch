@@ -47,12 +47,13 @@ async function fixture(backend: "auto" | "json") {
   const baseUrl = `http://127.0.0.1:${upstreamPort}`;
   const controls = {
     tokenError: false, resolverError: false, revision: "original",
+    token: "test-token",
     beforeResolve: undefined as (() => Promise<void>) | undefined,
   };
   const config = new GatewayConfigCoordinator({
     loadToken: async () => {
       if (controls.tokenError) throw new Error("token failed");
-      return "test-token";
+      return controls.token;
     },
     resolveForwarder: async (profile) => {
       if (controls.resolverError) throw new Error("resolver failed");
@@ -282,5 +283,51 @@ describe.each(["auto", "json"] as const)("gateway lifecycle ownership (%s)", (ba
     expect(store.listGatewayProbeHistory("beta", pool.id)).toEqual([]);
     expect(await (await request(pool.virtualModel)).json()).toMatchObject({ owner: "beta-original" });
     expect(config.status().upstreams).toHaveLength(1);
+  });
+});
+
+describe.each(["auto", "json"] as const)("gateway connection recovery (%s)", (backend) => {
+  it("recovers the accepted runtime token only for its owner without reading a changed token source", async () => {
+    const { config, pool, start, controls } = await fixture(backend);
+    await start();
+    controls.token = "unapplied-token";
+    controls.tokenError = true;
+    controls.resolverError = true;
+    const connection = config.status("alpha");
+    const response = await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${connection.token}` } });
+    expect(response.status).toBe(200);
+    const models = await response.json();
+    expect(models).toMatchObject({ data: [{ id: pool.virtualModel }] });
+    expect(config.status("beta").token).toBeUndefined();
+    expect(config.status().token).toBeUndefined();
+    const health = await fetch(`http://127.0.0.1:${pool.port}/healthz`);
+    expect(health.status).toBe(200);
+    expect(await health.text()).not.toContain(connection.token);
+    expect(JSON.stringify(models)).not.toContain(connection.token);
+  });
+
+  it("keeps the old accepted token on a failed switch and changes it only after a successful owner transition", async () => {
+    const { store, config, pool, start, controls } = await fixture(backend);
+    await config.save(store, { ...pool, profile: "beta" });
+    await start();
+    const original = config.status("alpha").token;
+    controls.token = "replacement-token";
+    controls.resolverError = true;
+    await expect(config.start(store, "beta")).rejects.toThrow("resolver failed");
+    const retained = config.status("alpha");
+    expect(retained).toMatchObject({ running: true, profileId: "alpha" });
+    expect((await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${retained.token}` } })).status).toBe(200);
+    expect(config.status("beta").token).toBeUndefined();
+    controls.resolverError = false;
+    await config.start(store, "beta");
+    const switched = config.status("beta");
+    expect(switched).toMatchObject({ running: true, profileId: "beta" });
+    expect(config.status("alpha").token).toBeUndefined();
+    expect((await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${switched.token}` } })).status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${pool.port}/v1/models`, { headers: { authorization: `Bearer ${original}` } })).status).toBe(401);
+    await config.stop("beta");
+    const stopped = config.status("beta");
+    expect(stopped.running).toBe(false);
+    expect(stopped.token).toBeUndefined();
   });
 });

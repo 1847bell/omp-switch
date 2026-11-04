@@ -552,7 +552,7 @@
     "start": "启动 Profile {{profile}}",
     "switchProfile": "切换到 Profile {{profile}}",
     "stop": "停止 Profile {{profile}}",
-    "bearerToken": "Bearer token（调用时必须携带）",
+    "bearerToken": "Profile {{profile}} 的 Bearer token（调用时必须携带）",
     "upstreamStatus": "上游状态",
     "consecutiveFailures": "连续失败 {{count}}",
     "probeUpstream": "测速探针",

@@ -479,7 +479,7 @@ function registerIpc(): void {
     safeSessionProfileId(pool.profile);
     return gatewayConfig.save(metadata, pool);
   });
-  ipcMain.handle("gateway:status", () => gatewayConfig.status());
+  ipcMain.handle("gateway:status", (_event, profileId: string) => gatewayConfig.status(safeSessionProfileId(profileId)));
   ipcMain.handle("gateway:health", (_event, profileId: string, poolId?: string) => metadata.getGatewayHealth(safeSessionProfileId(profileId), poolId));
   ipcMain.handle("gateway:probe", async (_event, profile: string, poolId: string, upstreamId: string, timeoutMs?: number) => {
     const profileId = safeSessionProfileId(profile);

@@ -104,6 +104,11 @@ It mirrors Oh My Pi's own auth-gateway posture:
   `allowAnonymous` is passed deliberately. The token is generated into
   `userData/gateway/gateway.token` with mode `0600` in a `0700` directory, and compared with
   `crypto.timingSafeEqual`.
+- The trusted renderer recovers connection tokens through profile-scoped `gateway:status` IPC.
+  The main process validates the Profile ID; only the matching live owner receives the in-memory
+  token accepted by that running instance. Unscoped, other-Profile and stopped status queries do
+  not return it. Recovery neither loads nor creates a token file and adds no HTTP recovery route;
+  `/healthz` and `/v1/models` do not include the token. Do not log token values.
 - A **non-loopback `Host` header is rejected with 421.** A browser can reach `127.0.0.1`, so this is
   what defeats DNS rebinding.
 - Any request carrying an **`Origin` header is rejected with 403**, and no `Access-Control-Allow-*`

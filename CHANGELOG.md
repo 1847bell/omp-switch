@@ -15,6 +15,7 @@
 - Gateway probes and pre-response retries now cancel abandoned upstream fetches, releasing unread or infinite bodies without relying on garbage collection. The final selected JSON/SSE response retains its own cancellation and timeout lifecycle.
 - New gateway upstreams use unique IDs that do not reuse deleted upstream identities. Draft row keys are independent of editable IDs, preserving input focus and avoiding duplicate React keys while editing. The editor and save boundary reject duplicate IDs within a pool, including disabled upstreams, before persistence or live routing changes.
 - Gateway probes now require a saved, unchanged pool and recheck its saved version before running. Results belong to the tested configuration snapshot, stored health is labelled historical, and batch probes report per-upstream failures instead of false success. Probing never implicitly saves a draft or changes live routes.
+- The gateway page restores the live connection token on refresh and re-entry, even with no pool selected. Profile-scoped status returns only the token accepted by the matching running instance; other Profiles and stopped services receive none. Failed refreshes hide unconfirmed tokens, while failed restarts can recover a still-active connection. Public HTTP endpoints do not expose token recovery.
 
 ## 1.0.2 - 2026-11-02
 
