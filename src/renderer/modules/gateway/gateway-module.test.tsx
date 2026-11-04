@@ -249,3 +249,121 @@ describe("gateway upstream identity", () => {
     expect((await api.gatewayStatus()).running).toBe(false);
   });
 });
+
+describe("gateway saved-configuration probes", () => {
+  const button = (container: HTMLElement, key: string) => [...container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.getAttribute("aria-label") === i18n.t(key) || candidate.title === i18n.t(key))!;
+  const fill = async (container: HTMLElement, name: string, value: string) => {
+    const input = container.querySelector<HTMLInputElement>(`input[name='${name}']`)!;
+    await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
+  };
+
+  it("requires saving a new pool before probing and does not implicitly persist it", async () => {
+    const api = createMockApi();
+    const view = await mount(api);
+    await view.click("gateway.newPool", "default");
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(true);
+    expect(button(view.container, "gateway.probeAll").disabled).toBe(true);
+    expect(view.container.textContent).toContain(i18n.t("gateway.probeSaveFirst"));
+    expect(await api.listGatewayPools("default")).toEqual([]);
+  });
+
+  it("blocks edited credentials and new upstreams until saved, including after a failed save", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    await api.saveGatewayPool(saved);
+    const view = await mount(api);
+    await view.selectPool();
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
+    await fill(view.container, "upstreams.0.credentialId", "changed");
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(true);
+    api.saveGatewayPool = async () => { throw new Error("disk full"); };
+    await view.save();
+    expect(button(view.container, "gateway.probeAll").disabled).toBe(true);
+    expect((await api.listGatewayPools("default"))[0]).toEqual(saved);
+    await act(async () => { button(view.container, "gateway.addUpstream").click(); });
+    expect([...view.container.querySelectorAll<HTMLButtonElement>(`button[aria-label='${i18n.t("gateway.probeUpstream")}']`)].every((candidate) => candidate.disabled)).toBe(true);
+    expect(view.container.textContent).toContain(i18n.t("gateway.probeSaveFirst"));
+  });
+
+  it("rejects a saved version changed outside the current editor before running a probe", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    await api.saveGatewayPool(saved);
+    const view = await mount(api);
+    await view.selectPool();
+    await api.saveGatewayPool({ ...saved, upstreams: [{ ...saved.upstreams[0], credentialId: "external" }] });
+    await act(async () => { button(view.container, "gateway.probeUpstream").click(); });
+    expect(view.notices).toContainEqual({ tone: "error", text: i18n.t("gateway.probeConfigurationChanged") });
+    expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(true);
+  });
+
+  it("does not attach a late probe result to edited credentials and clears it after saving", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    let finish!: (result: { ok: boolean; status: number; latencyMs: number }) => void;
+    api.probeGatewayUpstream = () => new Promise((resolve) => { finish = resolve; });
+    const view = await mount(api);
+    await view.selectPool();
+    await act(async () => { button(view.container, "gateway.probeUpstream").click(); });
+    const save = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === i18n.t("common.save"))!;
+    expect(save.disabled).toBe(true);
+    await fill(view.container, "upstreams.0.credentialId", "changed");
+    await act(async () => { finish({ ok: true, status: 200, latencyMs: 937 }); });
+    expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[0].credentialId).toBe("changed");
+    expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
+  });
+
+  it("does not show a previous pool's late result on another pool with the same upstream ID", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    await api.saveGatewayPool({ ...pool("default"), id: "other", virtualModel: "omp-switch/other" });
+    let finish!: (result: { ok: boolean; status: number; latencyMs: number }) => void;
+    api.probeGatewayUpstream = () => new Promise((resolve) => { finish = resolve; });
+    const view = await mount(api);
+    await view.selectPool();
+    await act(async () => { button(view.container, "gateway.probeUpstream").click(); });
+    await act(async () => { (view.container.querySelectorAll(".module-list-row")[1] as HTMLButtonElement).click(); });
+    await act(async () => { finish({ ok: true, status: 200, latencyMs: 937 }); });
+    expect(view.model()).toBe("omp-switch/other");
+    expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
+  });
+
+  it("reports partial failures, including rejected probes, and counts only enabled upstreams", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams = [saved.upstreams[0], { ...saved.upstreams[0], id: "two" }, { ...saved.upstreams[0], id: "three" }, { ...saved.upstreams[0], id: "disabled", enabled: false }];
+    await api.saveGatewayPool(saved);
+    api.gatewayHealth = async () => ({ "shared:two": { poolId: "shared", upstreamId: "two", ok: true, consecutiveFailures: 0, healthState: "healthy", lastLatencyMs: 444, recentHistory: [] } });
+    api.probeGatewayUpstream = async (_profile, _poolId, id) => {
+      if (id === "two") throw new Error("credential missing");
+      return id === "one" ? { ok: true, status: 200, latencyMs: 17 } : { ok: false, status: 503, latencyMs: 23, error: "HTTP 503" };
+    };
+    const view = await mount(api);
+    await view.selectPool();
+    await act(async () => { button(view.container, "gateway.probeAll").click(); });
+    const errors = view.notices.filter((notice) => notice.tone === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0].text).toContain(i18n.t("gateway.probeAllFailed", { pool: saved.id, count: 3, ok: 1, failed: 2 }));
+    expect(errors[0].text).toContain("credential missing");
+    expect(errors[0].text).toContain("HTTP 503");
+    expect(view.notices.some((notice) => notice.tone === "success")).toBe(false);
+    expect([...view.container.querySelectorAll(".health-badge")].map((badge) => badge.classList.contains("unhealthy"))).toEqual([false, true, true, false]);
+    expect(view.container.querySelectorAll(".health-badge")[1].textContent).toBe(i18n.t("gateway.probeError"));
+  });
+
+  it("does not report successful batch completion when no upstream is enabled", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    saved.upstreams[0].enabled = false;
+    await api.saveGatewayPool(saved);
+    const view = await mount(api);
+    await view.selectPool();
+    expect(button(view.container, "gateway.probeAll").disabled).toBe(true);
+    expect(view.container.textContent).toContain(i18n.t("gateway.probeNoneEnabled"));
+    expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
+  });
+});

@@ -26,6 +26,7 @@ import { formatDateTime, formatClock } from "../../locale";
 
 type AppApi = NonNullable<Window["ompSwitch"]>;
 type Notice = { tone: "success" | "error" | "info"; text: string };
+type ProbeOutcome = { ok: boolean; status?: number; latencyMs?: number; error?: string };
 
 interface GatewayProps {
   api: AppApi;
@@ -64,6 +65,10 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   const [loading, setLoading] = useState(false);
   const [probingAll, setProbingAll] = useState(false);
   const modelOptions = useMemo(() => providers.flatMap(([providerId, provider]) => (Array.isArray(provider.models) ? provider.models : []).map((model) => ({ providerId, modelId: model.id, label: `${providerId}/${model.id}` }))), [providers]);
+  const savedPool = pools.find((pool) => pool.id === draft?.id);
+  const draftVersion = useMemo(() => JSON.stringify(draft), [draft]);
+  const savedVersion = useMemo(() => JSON.stringify(savedPool), [savedPool]);
+  const canProbe = Boolean(savedPool && draftVersion === savedVersion);
 
   async function refreshStatus(): Promise<void> {
     const current = await api.gatewayStatus();
@@ -136,6 +141,8 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
       const saved = await api.saveGatewayPool({ ...draft, id: draft.id.trim(), virtualModel: draft.virtualModel.trim() });
       setPools((current) => [saved, ...current.filter((pool) => pool.id !== saved.id)]);
       openDraft(saved);
+      setProbeRun(null);
+      setHealthMap((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${saved.id}:`))));
       onNotice({ tone: "success", text: t("gateway.poolSaved", { profile: profileId }) });
       return saved;
     } catch (error) {
@@ -169,21 +176,43 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   const [probingUpstreamId, setProbingUpstreamId] = useState<string | null>(null);
-  const [probeResults, setProbeResults] = useState<Record<string, { ok: boolean; status?: number; latencyMs: number; error?: string }>>({});
+  const [probeRun, setProbeRun] = useState<{ version: string; results: Record<string, ProbeOutcome> } | null>(null);
+  const probeResults = canProbe && probeRun && probeRun.version === draftVersion ? probeRun.results : undefined;
+  const isProbing = probingUpstreamId !== null || probingAll;
+
+  async function verifyProbeVersion(pool: GatewayPool): Promise<boolean> {
+    const currentPools = await api.listGatewayPools(profileId);
+    if (JSON.stringify(currentPools.find((candidate) => candidate.id === pool.id)) === JSON.stringify(pool)) return true;
+    setPools(currentPools);
+    onNotice({ tone: "error", text: t("gateway.probeConfigurationChanged") });
+    return false;
+  }
+
+  async function probeSavedUpstream(pool: GatewayPool, upstream: GatewayUpstream): Promise<ProbeOutcome> {
+    let result: ProbeOutcome;
+    try {
+      result = await api.probeGatewayUpstream(profileId, pool.id, upstream.id);
+    } catch (error) {
+      result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const version = JSON.stringify(pool);
+    setProbeRun((current) => ({ version, results: { ...(current && current.version === version ? current.results : {}), [upstream.id]: result } }));
+    return result;
+  }
 
   async function testProbe(upstream: GatewayUpstream): Promise<void> {
-    if (!draft) return;
+    if (isProbing) return;
+    if (!savedPool || !canProbe) return onNotice({ tone: "info", text: t("gateway.probeSaveFirst") });
+    const pool = savedPool;
     setProbingUpstreamId(upstream.id);
     try {
-      const res = await api.probeGatewayUpstream(profileId, draft.id, upstream.id);
-      setProbeResults((current) => ({ ...current, [upstream.id]: res }));
-      const updatedHealth = await api.gatewayHealth(profileId, draft.id);
+      if (!await verifyProbeVersion(pool)) return;
+      const res = await probeSavedUpstream(pool, upstream);
+      onNotice(res.ok
+        ? { tone: "success", text: t("gateway.probeSuccess", { pool: pool.id, id: upstream.id, latency: res.latencyMs }) }
+        : { tone: "error", text: t("gateway.probeFailed", { pool: pool.id, id: upstream.id, error: res.error || "Error" }) });
+      const updatedHealth = await api.gatewayHealth(profileId, pool.id);
       setHealthMap((current) => ({ ...current, ...updatedHealth }));
-      if (res.ok) {
-        onNotice({ tone: "success", text: t("gateway.probeSuccess", { id: upstream.id, latency: res.latencyMs }) });
-      } else {
-        onNotice({ tone: "error", text: t("gateway.probeFailed", { id: upstream.id, error: res.error || "Error" }) });
-      }
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -192,24 +221,26 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
   }
 
   async function probeAll(): Promise<void> {
-    if (!draft) return;
+    if (isProbing) return;
+    if (!savedPool || !canProbe) return onNotice({ tone: "info", text: t("gateway.probeSaveFirst") });
+    const pool = savedPool;
+    const targets = pool.upstreams.filter((upstream) => upstream.enabled);
+    if (!targets.length) return onNotice({ tone: "info", text: t("gateway.probeNoneEnabled") });
     setProbingAll(true);
-    let okCount = 0;
+    const failures: string[] = [];
     try {
-      for (const upstream of draft.upstreams) {
-        if (!upstream.enabled) continue;
+      if (!await verifyProbeVersion(pool)) return;
+      for (const upstream of targets) {
         setProbingUpstreamId(upstream.id);
-        try {
-          const res = await api.probeGatewayUpstream(profileId, draft.id, upstream.id);
-          setProbeResults((current) => ({ ...current, [upstream.id]: res }));
-          if (res.ok) okCount++;
-        } catch {
-          // continue
-        }
+        const res = await probeSavedUpstream(pool, upstream);
+        if (!res.ok) failures.push(`${upstream.id}: ${res.error || "Error"}`);
       }
-      const updatedHealth = await api.gatewayHealth(profileId, draft.id);
+      const counts = { pool: pool.id, count: targets.length, ok: targets.length - failures.length, failed: failures.length };
+      onNotice(failures.length
+        ? { tone: "error", text: `${t("gateway.probeAllFailed", counts)} ${failures.join("; ")}` }
+        : { tone: "success", text: t("gateway.probeAllFinished", counts) });
+      const updatedHealth = await api.gatewayHealth(profileId, pool.id);
       setHealthMap((current) => ({ ...current, ...updatedHealth }));
-      onNotice({ tone: "success", text: t("gateway.probeAllFinished", { count: draft.upstreams.length, ok: okCount }) });
     } catch (error) {
       onNotice({ tone: "error", text: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -326,7 +357,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                       className="secondary-button compact"
                       title={t("gateway.probeAll")}
                       onClick={() => void probeAll()}
-                      disabled={loading || probingAll}
+                      disabled={loading || isProbing || !canProbe || !draft.upstreams.some((upstream) => upstream.enabled)}
                     >
                       <Activity size={13} className={probingAll ? "spin" : ""} />
                       <span>{t("gateway.probeAll")}</span>
@@ -339,12 +370,16 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                     </IconButton>
                   </div>
                 </div>
+                <p className="muted-line" aria-live="polite">
+                  {t(canProbe ? "gateway.probeSavedHint" : "gateway.probeSaveFirst")}
+                  {canProbe && !draft.upstreams.some((upstream) => upstream.enabled) ? ` ${t("gateway.probeNoneEnabled")}` : ""}
+                </p>
                 {draft.upstreams.map((upstream, index) => {
                   const healthKey = `${draft.id}:${upstream.id}`;
-                  const health = healthMap[healthKey];
-                  const probeResult = probeResults[upstream.id];
-                  const healthState = health?.healthState ?? (probeResult ? (probeResult.ok ? "healthy" : "unhealthy") : "untested");
-                  const latency = probeResult?.latencyMs ?? health?.lastLatencyMs;
+                  const health = canProbe ? healthMap[healthKey] : undefined;
+                  const probeResult = probeResults?.[upstream.id];
+                  const healthState = probeResult ? (probeResult.ok ? "healthy" : "unhealthy") : health?.healthState ?? "untested";
+                  const latency = probeResult ? probeResult.latencyMs : health?.lastLatencyMs;
 
                   return (
                     <div className="upstream-row" key={upstreamRowKeys.get(upstream)}>
@@ -389,7 +424,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                         variant="subtle"
                         label={t("gateway.probeUpstream")}
                         onClick={() => void testProbe(upstream)}
-                        disabled={loading || probingUpstreamId === upstream.id || probingAll}
+                        disabled={loading || isProbing || !canProbe}
                       >
                         <Activity size={14} className={probingUpstreamId === upstream.id ? "spin" : ""} />
                       </IconButton>
@@ -397,6 +432,8 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                         label={
                           <div className="tip-stack">
                             <span className="tip-stack-date">{t(`gateway.health.${healthState}`)}</span>
+                            {health ? <span className="tip-stack-sub">{t("gateway.probeHistoryHint")}</span> : null}
+                            {probeResult?.error ? <span className="tip-stack-sub">{probeResult.error}</span> : null}
                             {latency !== undefined ? (
                               <span className="tip-stack-value">{latency} ms {probeResult?.status ? `(HTTP ${probeResult.status})` : ""}</span>
                             ) : null}
@@ -419,7 +456,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                       >
                         <span className={`health-badge ${healthState}`}>
                           <span className="status-led" />
-                          <span>{latency !== undefined ? `${latency}ms` : t("gateway.untested")}</span>
+                          <span>{!probeResult && health ? `${t("gateway.probeHistory")} · ` : ""}{latency !== undefined ? `${latency}ms` : t(probeResult && !probeResult.ok ? "gateway.probeError" : "gateway.untested")}</span>
                         </span>
                       </Tip>
                       <IconButton
@@ -436,10 +473,10 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
                 })}
               </div>
               <div className="drawer-actions">
-                <button className="primary-button" onClick={() => void saveDraft()} disabled={loading || readOnly}>
+                <button className="primary-button" onClick={() => void saveDraft()} disabled={loading || readOnly || isProbing}>
                   <Save size={15} />{t("common.save")}
                 </button>
-                <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly}>
+                <button className="secondary-button" onClick={() => void start()} disabled={loading || readOnly || isProbing}>
                   <Play size={14} />{t(status.running && status.profileId !== profileId ? "gateway.switchProfile" : "gateway.start", { profile: profileId })}
                 </button>
               </div>
