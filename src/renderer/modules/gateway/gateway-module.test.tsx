@@ -3,11 +3,41 @@ import { EventEmitter, once } from "node:events";
 import { act } from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GatewayPool } from "@omp-switch/core";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { GatewayPool, OmpProvider } from "@omp-switch/core";
 import { createMockApi } from "../../api";
 import i18n from "../../i18n";
 import { GatewayModule } from "./gateway-module";
+
+const scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+beforeAll(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+});
+afterAll(() => {
+  if (scrollIntoViewDescriptor) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", scrollIntoViewDescriptor);
+  else Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  vi.unstubAllGlobals();
+});
+
+const credentialProviders: Array<[string, OmpProvider]> = [
+  ["local", { apiKey: '!bridge --secret-get "credential-local"', models: [{ id: "model", name: "Local model" }, { id: "next/model", name: "Next local model" }] }],
+  ["other", { apiKey: '!bridge --secret-get "credential-other"', models: [{ id: "model", name: "Other model" }] }],
+  ["environment", { apiKey: "EXTERNAL_API_KEY", headers: { "X-Other-Key": '!bridge --secret-get "credential-header"' }, models: [{ id: "model", name: "Environment model" }] }],
+];
+
+async function selectUpstreamModel(container: HTMLElement, selector: string): Promise<void> {
+  await act(async () => { container.querySelector<HTMLButtonElement>(".upstream-row .mp-trigger")!.click(); });
+  const option = [...document.querySelectorAll<HTMLButtonElement>(".mp-option")].find((candidate) => candidate.querySelector(".mp-option-main small")?.textContent === selector)!;
+  await act(async () => { option.click(); });
+}
+
+async function selectUpstreamAuth(container: HTMLElement, key: string): Promise<void> {
+  await act(async () => { container.querySelector<HTMLButtonElement>(".upstream-row .sel-trigger")!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); });
+  const option = [...document.querySelectorAll<HTMLElement>("[role='option']")].find((candidate) => candidate.textContent === i18n.t(key))!;
+  await act(async () => { option.click(); });
+}
 
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
 afterEach(async () => {
@@ -18,14 +48,14 @@ function pool(profile: string): GatewayPool {
   return { id: "shared", profile, virtualModel: `omp-switch/${profile}`, enabled: true, upstreams: [{ id: "one", providerId: "local", modelId: "model", kind: "secret", credentialId: "test", enabled: true }] };
 }
 
-async function mount(api = createMockApi()) {
+async function mount(api = createMockApi(), providers: Array<[string, OmpProvider]> = []) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   mounted.push({ root, container });
   const notices: Array<{ tone: "success" | "error" | "info"; text: string }> = [];
   const render = async (profileId: string) => {
-    await act(async () => { root.render(<TooltipPrimitive.Provider><GatewayModule api={api} profileId={profileId} readOnly={false} onNotice={(notice) => notices.push(notice)} providers={[]} /></TooltipPrimitive.Provider>); });
+    await act(async () => { root.render(<TooltipPrimitive.Provider><GatewayModule api={api} profileId={profileId} readOnly={false} onNotice={(notice) => notices.push(notice)} providers={providers} /></TooltipPrimitive.Provider>); });
   };
   await render("default");
   const selectPool = async () => { await act(async () => { (container.querySelector(".module-list-row") as HTMLButtonElement).click(); }); };
@@ -261,10 +291,10 @@ describe("gateway saved-configuration probes", () => {
     const api = createMockApi();
     const saved = pool("default");
     await api.saveGatewayPool(saved);
-    const view = await mount(api);
+    const view = await mount(api, credentialProviders);
     await view.selectPool();
     expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
-    await fill(view.container, "upstreams.0.credentialId", "changed");
+    await selectUpstreamModel(view.container, "other/model");
     expect(button(view.container, "gateway.probeUpstream").disabled).toBe(true);
     api.saveGatewayPool = async () => { throw new Error("disk full"); };
     await view.save();
@@ -369,16 +399,16 @@ describe("gateway saved-configuration probes", () => {
     await api.saveGatewayPool(pool("default"));
     let finish!: (result: { ok: boolean; status: number; latencyMs: number }) => void;
     api.probeGatewayUpstream = () => new Promise((resolve) => { finish = resolve; });
-    const view = await mount(api);
+    const view = await mount(api, credentialProviders);
     await view.selectPool();
     await act(async () => { button(view.container, "gateway.probeUpstream").click(); });
     const save = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === i18n.t("common.save"))!;
     expect(save.disabled).toBe(true);
-    await fill(view.container, "upstreams.0.credentialId", "changed");
+    await selectUpstreamModel(view.container, "other/model");
     await act(async () => { finish({ ok: true, status: 200, latencyMs: 937 }); });
     expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
     await view.save();
-    expect((await api.listGatewayPools("default"))[0].upstreams[0].credentialId).toBe("changed");
+    expect((await api.listGatewayPools("default"))[0].upstreams[0].credentialId).toBe("credential-other");
     expect(view.container.querySelector(".health-badge")?.textContent).toBe(i18n.t("gateway.untested"));
     expect(button(view.container, "gateway.probeUpstream").disabled).toBe(false);
   });
@@ -766,7 +796,7 @@ describe("gateway upstream enabled draft", () => {
     await api.saveGatewayPool(pool("default"));
     const view = await mount(api);
     await view.selectPool();
-    const input = view.container.querySelector<HTMLInputElement>("input[name='upstreams.0.credentialId']")!;
+    const input = view.container.querySelector<HTMLInputElement>("input[name='upstreams.0.id']")!;
     await view.selectPool();
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
@@ -778,11 +808,11 @@ describe("gateway upstream enabled draft", () => {
         focused.dispatchEvent(new InputEvent("input", { data: key, inputType: "insertText", bubbles: true }));
         focused.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true }));
       });
-      expect(view.container.querySelector("input[name='upstreams.0.credentialId']")).toBe(input);
+      expect(view.container.querySelector("input[name='upstreams.0.id']")).toBe(input);
       expect(document.activeElement).toBe(input);
     }
-    expect(input.value).toBe("testXY");
-    expect((await api.listGatewayPools("default"))[0].upstreams[0].credentialId).toBe("test");
+    expect(input.value).toBe("oneXY");
+    expect((await api.listGatewayPools("default"))[0].upstreams[0].id).toBe("one");
   });
 
   it("keeps stable row identity and persists an all-disabled draft only on save, then applies a re-enabled draft on Start", async () => {
@@ -822,5 +852,68 @@ describe("gateway upstream enabled draft", () => {
     await act(async () => { view.container.querySelector<HTMLButtonElement>(`button[title='${i18n.t("gateway.probeAll")}']`)!.click(); });
     expect(view.notices).toContainEqual({ tone: "success", text: i18n.t("gateway.probeAllFinished", { pool: "shared", count: 1, ok: 1, failed: 0 }) });
     expect([...view.container.querySelectorAll(".health-badge")].map((badge) => badge.textContent)).toEqual(["29ms", i18n.t("gateway.untested")]);
+  });
+});
+
+describe("gateway automatic credentials", () => {
+  const credential = (container: HTMLElement) => container.querySelector<HTMLInputElement>("input[name='upstreams.0.credentialId']")!;
+
+  it("binds the default model and added upstreams to their provider credential without manual entry", async () => {
+    const api = createMockApi();
+    const view = await mount(api, credentialProviders);
+    await view.click("gateway.newPool", "default");
+    expect(credential(view.container).value).toBe("credential-local");
+    expect(credential(view.container).readOnly).toBe(true);
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(`button[aria-label='${i18n.t("gateway.addUpstream")}']`)!.click(); });
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams.map(({ providerId, modelId, credentialId }) => ({ providerId, modelId, credentialId }))).toEqual([
+      { providerId: "local", modelId: "model", credentialId: "credential-local" },
+      { providerId: "local", modelId: "model", credentialId: "credential-local" },
+    ]);
+  });
+
+  it("rebinds a legacy credential when selecting a model and replaces it again across providers", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api, credentialProviders);
+    await view.selectPool();
+    await selectUpstreamModel(view.container, "local/next/model");
+    expect(credential(view.container).value).toBe("credential-local");
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[0]).toMatchObject({ providerId: "local", modelId: "next/model", credentialId: "credential-local" });
+    await selectUpstreamModel(view.container, "other/model");
+    expect(credential(view.container).value).toBe("credential-other");
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[0]).toMatchObject({ providerId: "other", modelId: "model", credentialId: "credential-other" });
+  });
+
+  it("clears the previous credential for a provider without a saved apiKey reference and refuses to persist it", async () => {
+    const api = createMockApi();
+    const saved = pool("default");
+    await api.saveGatewayPool(saved);
+    const view = await mount(api, credentialProviders);
+    await view.selectPool();
+    await selectUpstreamModel(view.container, "environment/model");
+    expect(credential(view.container).value).toBe("");
+    expect(credential(view.container).getAttribute("aria-invalid")).toBe("true");
+    await view.save();
+    expect(await api.listGatewayPools("default")).toEqual([saved]);
+  });
+
+  it("removes vault binding for OAuth and restores the selected provider credential when switching back", async () => {
+    const api = createMockApi();
+    await api.saveGatewayPool(pool("default"));
+    const view = await mount(api, credentialProviders);
+    await view.selectPool();
+    await selectUpstreamAuth(view.container, "gateway.kindOmpAuth");
+    expect(credential(view.container).value).toBe("");
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[0]).toMatchObject({ kind: "omp-auth-gateway" });
+    await selectUpstreamModel(view.container, "other/model");
+    expect(credential(view.container).value).toBe("");
+    await selectUpstreamAuth(view.container, "gateway.kindSecret");
+    expect(credential(view.container).value).toBe("credential-other");
+    await view.save();
+    expect((await api.listGatewayPools("default"))[0].upstreams[0]).toMatchObject({ kind: "secret", providerId: "other", credentialId: "credential-other" });
   });
 });

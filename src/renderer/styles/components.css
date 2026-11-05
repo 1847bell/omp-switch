@@ -48,8 +48,6 @@
 .dd-label { padding: 4px 9px 2px; color: var(--muted); font-size: var(--fs-micro); font-weight: 650; letter-spacing: 0.01em; }
 .dd-check { display: inline-grid; place-items: center; width: 14px; color: var(--signal); }
 
-.upstream-row .mp-trigger { min-height: 28px; }
-
 /* ---- ModelPicker (A2) ---- */
 
 .mp-trigger {

@@ -133,6 +133,10 @@ It mirrors Oh My Pi's own auth-gateway posture:
 - Upstream requests time out after 255 s and failover happens **before** any bytes are relayed, and
   only on retryable statuses — a rejected credential (401/403) must not cascade to the next upstream.
 - Credentials resolve lazily per request through an injected callback and are never held in the pool.
+- Automatic gateway credential binding parses only the selected provider's saved `apiKey` command
+  reference, not header references or unrelated credentials. It requires one recognized credential ID,
+  never executes the command or reads the secret, and clears vault binding for OMP OAuth. The displayed
+  ID is read-only; missing or ambiguous references cannot silently retain another provider's ID.
 
 ## Input validation
 

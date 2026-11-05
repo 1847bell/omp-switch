@@ -4,7 +4,8 @@
 
 ### Fixed
 - Creating the first gateway pool now opens its draft editor instead of leaving the empty state visible. Closing an unsaved first pool returns to the empty state.
-- Gateway drafts use the full editor width when no pools exist. Upstream fields adapt to the editor width, with grouped health/probe/delete controls that stay inside the panel on narrow windows.
+- Gateway listener-port inputs stay compact beside their save action. Upstream cards separate enable/priority/probe controls from labelled two-column fields, collapsing to one column in narrow editors with matching control heights. First-pool drafts still use the full editor width.
+- Gateway secret-store upstreams automatically bind the selected provider's saved API-key credential reference on creation and model/authentication changes. IDs are read-only, stale bindings are cleared, and missing or ambiguous references block saving with an actionable hint. Windows bridge, Linux libsecret and age references are recognized without executing commands or reading secrets; OAuth uses no vault ID, and opening existing pools preserves saved bindings until selection changes.
 - Gateway Chat/Responses requests no longer treat a completed upload as client cancellation. Actual disconnects cancel pending upstream requests and release relayed response streams.
 - Gateway pools and health history are isolated by profile, including equal pool IDs. Existing metadata is migrated without assigning ambiguous legacy probe records to a profile, and changing profiles clears the previous editor state.
 - Saving a running gateway pool now applies its model and upstream routing changes before reporting success. Live port changes require stopping first; save/start/stop operations are serialized to prevent stale configuration from being applied.

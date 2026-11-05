@@ -19,6 +19,7 @@ import type {
   GatewayUpstreamHealth,
   OmpProvider,
 } from "@omp-switch/core";
+import { credentialIdFromApiKey } from "@omp-switch/core/credential-references";
 import { ModelPicker } from "../../components/model-picker";
 import { IconButton, StyledSelect, Tip } from "../../components/ui-primitives";
 import { ConfirmDialog } from "../../components/save-flow";
@@ -37,8 +38,8 @@ interface GatewayProps {
   providers: Array<[string, OmpProvider]>;
 }
 
-function makeGatewayUpstream(providerId: string, modelId: string): GatewayUpstream {
-  return { id: `upstream-${crypto.randomUUID()}`, providerId, modelId, kind: "secret", enabled: true };
+function makeGatewayUpstream(providerId: string, modelId: string, credentialId?: string): GatewayUpstream {
+  return { id: `upstream-${crypto.randomUUID()}`, providerId, modelId, kind: "secret", credentialId, enabled: true };
 }
 
 function makeGatewayPool(profileId: string, providers: Array<[string, OmpProvider]>): GatewayPool {
@@ -46,7 +47,7 @@ function makeGatewayPool(profileId: string, providers: Array<[string, OmpProvide
   const model = first && Array.isArray(first[1].models) ? first[1].models[0] : undefined;
   const providerId = first?.[0] ?? "";
   const modelId = model?.id ?? "";
-  const upstream = makeGatewayUpstream(providerId, modelId);
+  const upstream = makeGatewayUpstream(providerId, modelId, credentialIdFromApiKey(first?.[1].apiKey));
   return { id: `pool-${Date.now().toString(36)}`, profile: profileId, virtualModel: "omp-switch/default", enabled: true, upstreams: [upstream] };
 }
 
@@ -139,13 +140,17 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     setDraft((current) => current ? { ...current, upstreams: current.upstreams.map((upstream, itemIndex) => {
       if (itemIndex !== index) return upstream;
       const updated = { ...upstream, ...patch };
+      if (patch.providerId !== undefined || patch.modelId !== undefined || patch.kind !== undefined) {
+        const provider = providers.find(([id]) => id === updated.providerId)?.[1];
+        updated.credentialId = updated.kind === "secret" ? credentialIdFromApiKey(provider?.apiKey) : undefined;
+      }
       upstreamRowKeys.set(updated, upstreamRowKeys.get(upstream)!);
       return updated;
     }) } : current);
   }
 
   function addUpstream(): void {
-    const upstream = makeGatewayUpstream(providers[0]?.[0] ?? "", modelOptions[0]?.modelId ?? "");
+    const upstream = makeGatewayUpstream(providers[0]?.[0] ?? "", modelOptions[0]?.modelId ?? "", credentialIdFromApiKey(providers[0]?.[1].apiKey));
     upstreamRowKeys.set(upstream, crypto.randomUUID());
     setDraft((current) => current ? { ...current, upstreams: [...current.upstreams, upstream] } : current);
   }
@@ -167,6 +172,7 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
     if (!draft.id.trim() || !draft.virtualModel.trim()) return onNotice({ tone: "error", text: t("gateway.poolIdVirtualModelRequired") }), null;
     const upstreamIds = new Set<string>();
     for (const upstream of draft.upstreams) {
+      if (upstream.kind === "secret" && !upstream.credentialId) return onNotice({ tone: "error", text: t("gateway.credentialMissing") }), null;
       if (upstreamIds.has(upstream.id)) return onNotice({ tone: "error", text: t("gateway.duplicateUpstreamId", { id: upstream.id }) }), null;
       upstreamIds.add(upstream.id);
     }
@@ -367,13 +373,15 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
         </div>
       </div>
       <div className="gateway-connection">
-        <label className="module-field">
-          <span>{t("gateway.profilePort", { profile: profileId })}</span>
-          <input name="listenerPort" inputMode="numeric" value={portInput} onChange={(event) => setPortInput(event.target.value)} disabled={loading || readOnly || portLocked || listenerSettings === null} aria-describedby="gateway-port-hint" aria-invalid={portInput !== "" && !validPort} />
-        </label>
-        <button className="secondary-button" onClick={() => void savePort()} disabled={loading || deleting || readOnly || portLocked || !validPort || portSaved || listenerSettings === null}>
-          <Save size={15} />{t("gateway.savePort")}
-        </button>
+        <div className="module-field gateway-port-setting">
+          <label htmlFor="gateway-listener-port">{t("gateway.profilePort", { profile: profileId })}</label>
+          <div className="gateway-port-controls">
+            <input id="gateway-listener-port" name="listenerPort" inputMode="numeric" value={portInput} onChange={(event) => setPortInput(event.target.value)} disabled={loading || readOnly || portLocked || listenerSettings === null} aria-describedby="gateway-port-hint" aria-invalid={portInput !== "" && !validPort} />
+            <button className="secondary-button" onClick={() => void savePort()} disabled={loading || deleting || readOnly || portLocked || !validPort || portSaved || listenerSettings === null}>
+              <Save size={15} />{t("gateway.savePort")}
+            </button>
+          </div>
+        </div>
         <p id="gateway-port-hint" className="muted-line" aria-live="polite">
           {t("gateway.portHint")}
           {listenerSettings?.port === null ? ` ${t("gateway.portUnresolved", { ports: listenerSettings.conflictingPorts.join(", ") || t("gateway.portUnknown") })}` : ""}
@@ -476,94 +484,116 @@ function ProfileGatewayModule({ api, profileId, readOnly, onNotice, providers }:
 
                   return (
                     <div className="upstream-row" key={upstreamRowKeys.get(upstream)}>
-                      <div className="upstream-reorder-buttons">
-                        <IconButton label={t("gateway.moveUpstreamUp")} variant="subtle" disabled={index === 0} onClick={() => moveUpstream(index, "up")}>
-                          <ChevronUp size={13} />
-                        </IconButton>
-                        <IconButton label={t("gateway.moveUpstreamDown")} variant="subtle" disabled={index === draft.upstreams.length - 1} onClick={() => moveUpstream(index, "down")}>
-                          <ChevronDown size={13} />
-                        </IconButton>
+                      <div className="upstream-header">
+                        <div className="upstream-controls">
+                          <div className="upstream-reorder-buttons">
+                            <IconButton label={t("gateway.moveUpstreamUp")} variant="subtle" disabled={index === 0} onClick={() => moveUpstream(index, "up")}>
+                              <ChevronUp size={13} />
+                            </IconButton>
+                            <IconButton label={t("gateway.moveUpstreamDown")} variant="subtle" disabled={index === draft.upstreams.length - 1} onClick={() => moveUpstream(index, "down")}>
+                              <ChevronDown size={13} />
+                            </IconButton>
+                          </div>
+                          <label className="check-line module-check">
+                            <input name={`upstreams.${index}.enabled`} type="checkbox" aria-label={t("gateway.upstreamEnabled")} checked={upstream.enabled} onChange={(event) => updateUpstream(index, { enabled: event.target.checked })} />
+                            {t(upstream.enabled ? "gateway.enabled" : "gateway.disabled")}
+                          </label>
+                        </div>
+                        <div className="upstream-actions">
+                          <IconButton
+                            className={probeResult?.ok ? "ok" : ""}
+                            variant="subtle"
+                            label={t("gateway.probeUpstream")}
+                            onClick={() => void testProbe(upstream)}
+                            disabled={loading || deleting || isProbing || !canProbe || !upstream.enabled}
+                          >
+                            <Activity size={14} className={probingUpstreamId === upstream.id ? "spin" : ""} />
+                          </IconButton>
+                          <Tip
+                            label={
+                              <div className="tip-stack">
+                                <span className="tip-stack-date">{t(`gateway.health.${healthState}`)}</span>
+                                {health ? <span className="tip-stack-sub">{t("gateway.probeHistoryHint")}</span> : null}
+                                {probeResult?.error ? <span className="tip-stack-sub">{probeResult.error}</span> : null}
+                                {latency !== undefined ? (
+                                  <span className="tip-stack-value">{latency} ms {probeResult?.status ? `(HTTP ${probeResult.status})` : ""}</span>
+                                ) : null}
+                                {health?.lastProbeAt ? (
+                                  <span className="tip-stack-sub">{formatDateTime(health.lastProbeAt)}</span>
+                                ) : null}
+                                {health?.recentHistory && health.recentHistory.length > 0 ? (
+                                  <div className="health-history-list">
+                                    {health.recentHistory.slice(0, 5).map((h, i) => (
+                                      <div key={i} className={`health-history-item ${h.ok ? "ok" : "err"}`}>
+                                        <span>{h.ok ? "✓" : "✗"} {h.status ? `HTTP ${h.status}` : (h.error || "ERR")}</span>
+                                        <span>{h.latencyMs}ms</span>
+                                        <span>{formatClock(h.timestamp)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            }
+                          >
+                            <span className={`health-badge ${healthState}`}>
+                              <span className="status-led" />
+                              <span>{!probeResult && health ? `${t("gateway.probeHistory")} · ` : ""}{latency !== undefined ? `${latency}ms` : t(probeResult && !probeResult.ok ? "gateway.probeError" : "gateway.untested")}</span>
+                            </span>
+                          </Tip>
+                          <IconButton
+                            variant="danger"
+                            label={t("gateway.deleteUpstream")}
+                            onClick={() => setDraft((current) => current ? { ...current, upstreams: current.upstreams.filter((_, itemIndex) => itemIndex !== index) } : current)}
+                            disabled={draft.upstreams.length <= 1 || loading || deleting || isProbing || readOnly}
+                          >
+                            <Trash2 size={14} />
+                          </IconButton>
+                        </div>
                       </div>
                       <div className="upstream-fields">
-                      <label className="check-line module-check">
-                        <input name={`upstreams.${index}.enabled`} type="checkbox" aria-label={t("gateway.upstreamEnabled")} checked={upstream.enabled} onChange={(event) => updateUpstream(index, { enabled: event.target.checked })} />
-                        {t(upstream.enabled ? "gateway.enabled" : "gateway.disabled")}
-                      </label>
-                      <input name={`upstreams.${index}.id`} value={upstream.id} onChange={(event) => updateUpstream(index, { id: event.target.value })} aria-label={t("gateway.ariaUpstreamId")} />
-                      <ModelPicker
-                        providers={providers}
-                        value={upstream.providerId && upstream.modelId ? `${upstream.providerId}/${upstream.modelId}` : ""}
-                        onValueChange={(next) => {
-                          const slash = next.indexOf("/");
-                          if (slash < 0) return;
-                          updateUpstream(index, { providerId: next.slice(0, slash), modelId: next.slice(slash + 1) });
-                        }}
-                        ariaLabel={t("gateway.ariaProviderModel")}
-                      />
-                      <StyledSelect
-                        value={upstream.kind}
-                        onValueChange={(next) => updateUpstream(index, { kind: next as GatewayUpstream["kind"] })}
-                        options={[{ value: "secret", label: t("gateway.kindSecret") }, { value: "omp-auth-gateway", label: t("gateway.kindOmpAuth") }]}
-                        ariaLabel={t("gateway.ariaAuthKind")}
-                      />
-                      <input
-                        name={`upstreams.${index}.credentialId`}
-                        value={upstream.credentialId ?? ""}
-                        onChange={(event) => updateUpstream(index, { credentialId: event.target.value || undefined })}
-                        className="upstream-credential"
-                        placeholder={t("gateway.credentialId")}
-                        aria-label={t("gateway.credentialId")}
-                      />
-                      </div>
-                      <div className="upstream-actions">
-                      <IconButton
-                        className={probeResult?.ok ? "ok" : ""}
-                        variant="subtle"
-                        label={t("gateway.probeUpstream")}
-                        onClick={() => void testProbe(upstream)}
-                        disabled={loading || deleting || isProbing || !canProbe || !upstream.enabled}
-                      >
-                        <Activity size={14} className={probingUpstreamId === upstream.id ? "spin" : ""} />
-                      </IconButton>
-                      <Tip
-                        label={
-                          <div className="tip-stack">
-                            <span className="tip-stack-date">{t(`gateway.health.${healthState}`)}</span>
-                            {health ? <span className="tip-stack-sub">{t("gateway.probeHistoryHint")}</span> : null}
-                            {probeResult?.error ? <span className="tip-stack-sub">{probeResult.error}</span> : null}
-                            {latency !== undefined ? (
-                              <span className="tip-stack-value">{latency} ms {probeResult?.status ? `(HTTP ${probeResult.status})` : ""}</span>
-                            ) : null}
-                            {health?.lastProbeAt ? (
-                              <span className="tip-stack-sub">{formatDateTime(health.lastProbeAt)}</span>
-                            ) : null}
-                            {health?.recentHistory && health.recentHistory.length > 0 ? (
-                              <div className="health-history-list">
-                                {health.recentHistory.slice(0, 5).map((h, i) => (
-                                  <div key={i} className={`health-history-item ${h.ok ? "ok" : "err"}`}>
-                                    <span>{h.ok ? "✓" : "✗"} {h.status ? `HTTP ${h.status}` : (h.error || "ERR")}</span>
-                                    <span>{h.latencyMs}ms</span>
-                                    <span>{formatClock(h.timestamp)}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : null}
-                          </div>
-                        }
-                      >
-                        <span className={`health-badge ${healthState}`}>
-                          <span className="status-led" />
-                          <span>{!probeResult && health ? `${t("gateway.probeHistory")} · ` : ""}{latency !== undefined ? `${latency}ms` : t(probeResult && !probeResult.ok ? "gateway.probeError" : "gateway.untested")}</span>
-                        </span>
-                      </Tip>
-                      <IconButton
-                        variant="danger"
-                        label={t("gateway.deleteUpstream")}
-                        onClick={() => setDraft((current) => current ? { ...current, upstreams: current.upstreams.filter((_, itemIndex) => itemIndex !== index) } : current)}
-                        disabled={draft.upstreams.length <= 1 || loading || deleting || isProbing || readOnly}
-                      >
-                        <Trash2 size={14} />
-                      </IconButton>
+                        <label className="module-field">
+                          <span>{t("gateway.ariaUpstreamId")}</span>
+                          <input name={`upstreams.${index}.id`} value={upstream.id} onChange={(event) => updateUpstream(index, { id: event.target.value })} aria-label={t("gateway.ariaUpstreamId")} />
+                        </label>
+                        <div className="module-field">
+                          <span>{t("gateway.ariaProviderModel")}</span>
+                          <ModelPicker
+                            providers={providers}
+                            value={upstream.providerId && upstream.modelId ? `${upstream.providerId}/${upstream.modelId}` : ""}
+                            onValueChange={(next) => {
+                              const slash = next.indexOf("/");
+                              if (slash < 0) return;
+                              updateUpstream(index, { providerId: next.slice(0, slash), modelId: next.slice(slash + 1) });
+                            }}
+                            ariaLabel={t("gateway.ariaProviderModel")}
+                          />
+                        </div>
+                        <div className="module-field">
+                          <span>{t("gateway.ariaAuthKind")}</span>
+                          <StyledSelect
+                            value={upstream.kind}
+                            onValueChange={(next) => updateUpstream(index, { kind: next as GatewayUpstream["kind"] })}
+                            options={[{ value: "secret", label: t("gateway.kindSecret") }, { value: "omp-auth-gateway", label: t("gateway.kindOmpAuth") }]}
+                            ariaLabel={t("gateway.ariaAuthKind")}
+                          />
+                        </div>
+                        <label className="module-field">
+                          <span>{t("gateway.credentialId")}</span>
+                          <input
+                            name={`upstreams.${index}.credentialId`}
+                            value={upstream.credentialId ?? ""}
+                            readOnly
+                            disabled={upstream.kind === "omp-auth-gateway"}
+                            aria-invalid={upstream.kind === "secret" && !upstream.credentialId}
+                            aria-describedby={`gateway-credential-${upstreamRowKeys.get(upstream)}`}
+                            className="upstream-credential"
+                            placeholder={t("gateway.credentialId")}
+                            aria-label={t("gateway.credentialId")}
+                          />
+                          <small className="muted-line" id={`gateway-credential-${upstreamRowKeys.get(upstream)}`}>
+                            {t(upstream.kind === "omp-auth-gateway" ? "gateway.credentialOAuth" : upstream.credentialId ? "gateway.credentialAutomatic" : "gateway.credentialMissing")}
+                          </small>
+                        </label>
                       </div>
                     </div>
                   );

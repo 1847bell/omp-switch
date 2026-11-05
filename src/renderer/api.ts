@@ -233,10 +233,10 @@ export function createMockApi(): NonNullable<Window["ompSwitch"]> {
         { id: "demo-reasoning", name: "Demo Reasoning" },
       ],
     }),
-    secretPut: async (input) => ({
-      id: input.id ?? "demo-credential",
-      command: "omp-switch --secret-get demo-credential",
-    }),
+    secretPut: async (input) => {
+      const id = input.id ?? "demo-credential";
+      return { id, command: `omp-switch --secret-get "${id}"` };
+    },
     secretStatus: async () => ({ exists: true, label: "Demo credential", masked: "••••••••" }),
     secretDelete: async () => ({ deleted: true, references: [] }),
     secretOrphans: async () => [],

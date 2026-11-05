@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { describeOverlayPrecedence, findProjectOverlay } from "./project";
-import { collectReferencedCredentialIds } from "./adapter";
+import { collectReferencedCredentialIds, credentialIdFromApiKey } from "./credential-references";
 
 const tempRoots: string[] = [];
 
@@ -117,5 +117,20 @@ describe("credential references", () => {
   it("ignores an id that could not be a credential id", () => {
     // The vault only ever writes ids matching the anchored pattern, so a mismatch is not a reference.
     expect(collectReferencedCredentialIds({ providers: { a: { apiKey: '!x --secret-get "../escape"' } } }).size).toBe(0);
+  });
+
+  it("reads a single saved credential from each supported command format", () => {
+    expect(credentialIdFromApiKey('!"C:\\data\\omp-switch-secret.exe" --secret-get "credential-win" --data-dir "C:\\data"')).toBe("credential-win");
+    expect(credentialIdFromApiKey("!/usr/bin/secret-tool lookup service omp-switch credential credential-linux")).toBe("credential-linux");
+    expect(credentialIdFromApiKey('!age -d -i "/data/identity" "/data/OMP Switch/secrets/credential-age.age"')).toBe("credential-age");
+  });
+
+  it("does not select a credential from unsupported, literal, or ambiguous apiKeys", () => {
+    expect(credentialIdFromApiKey(undefined)).toBeUndefined();
+    expect(credentialIdFromApiKey("EXTERNAL_API_KEY")).toBeUndefined();
+    expect(credentialIdFromApiKey('literal --secret-get "not-a-reference"')).toBeUndefined();
+    expect(credentialIdFromApiKey("!custom-key-command")).toBeUndefined();
+    expect(credentialIdFromApiKey('!bridge --secret-get "../escape"')).toBeUndefined();
+    expect(credentialIdFromApiKey('!bridge --secret-get "first" && bridge --secret-get "second"')).toBeUndefined();
   });
 });

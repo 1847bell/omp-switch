@@ -1,6 +1,7 @@
 export * from "./adapter";
 export * from "./catalog";
 export * from "./cli";
+export * from "./credential-references";
 export * from "./discovery";
 export * from "./domain";
 export * from "./gateway";
