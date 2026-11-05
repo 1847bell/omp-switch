@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.3 - 2026-11-05
+
+### Changed
+- Keep CLI container publication behind Release review: tag pushes build assets and create a draft; GHCR version/latest images are published only after the Release is explicitly published.
+
 ### Fixed
 - Creating the first gateway pool now opens its draft editor instead of leaving the empty state visible. Closing an unsaved first pool returns to the empty state.
 - Gateway listener-port inputs stay compact beside their save action. Upstream cards separate enable/priority/probe controls from labelled two-column fields, collapsing to one column in narrow editors with matching control heights. First-pool drafts still use the full editor width.

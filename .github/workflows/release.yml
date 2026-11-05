@@ -3,12 +3,15 @@ name: Release Draft
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
 
 permissions: {}
 
 jobs:
   build:
     name: Build and attest Windows assets
+    if: github.event_name == 'push'
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:
@@ -118,6 +121,7 @@ jobs:
 
   build-linux:
     name: Build and attest Linux assets
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -187,6 +191,7 @@ jobs:
 
   draft-release:
     name: Create release draft
+    if: github.event_name == 'push'
     needs: [build, build-linux]
     runs-on: ubuntu-latest
     permissions:
@@ -284,7 +289,7 @@ jobs:
 
   publish-cli-image:
     name: Publish the headless CLI image to GHCR
-    needs: build
+    if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -300,7 +305,7 @@ jobs:
       # "clone the repository and build it yourself".
       - name: Build, smoke-test and push
         env:
-          TAG_NAME: ${{ github.ref_name }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
           OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail

@@ -26,6 +26,10 @@ The workflow rejects a tag whose name does not match `package.json` and requires
 by itself, which needs a `GH_TOKEN` it is not given and would bypass the draft-and-review gate: the
 workflow uploads the assets and creates the draft in a later step, deliberately. Keep the flag.
 
+Tag pushes create only a draft and its assets; they do not publish the headless CLI image. The image
+build, smoke test and GHCR push run only on `release: published`, after the draft is reviewed and
+explicitly published.
+
 ## Review the Draft
 
 The workflow produces only these user-facing assets:
